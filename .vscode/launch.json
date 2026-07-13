@@ -5,12 +5,31 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: Current File with Arguments",
+            "name": "rollout_steering_v2: orbis_stage2_450M_vq_if_tok_rec",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "${workspaceFolder}/evaluate/rollout_steering_v2.py",
             "console": "integratedTerminal",
-            "args": "${command:pickArgs}"
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--exp_dir",
+                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/",
+                "--config=config_distill.yaml",
+                "--val_config=configs/data/L1L2/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate.yaml",
+                "--num_steps=30",
+                "--num_gen_frames=40",
+                "--no_steering=True",
+                "--save_l2_debug=True",
+                "--save_condition_debug=True",
+                "--save_real=True",
+                "--use_ema=True",
+                "--classifier_free_guidance=0.0",
+                "--num_videos=16",
+                "--seed=61",
+                "--compile=True",
+                "--compile_artifacts=compile_cache.pkl",
+                "data.params.batch_size=1"
+            ]
         }
     ]
 }

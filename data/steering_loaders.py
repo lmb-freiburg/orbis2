@@ -262,6 +262,7 @@ class MultiMP4DatasetMultiFrameIdxMappingNVIDIAPhysAI(OdometryHorizonMixin, Mult
         subsample_interval=None,
         intrinsics_h5_path=None,
         spatial_transform_config=None,
+        validate_frame_rate_sample=True,
     ):
         self.odometry_frame_rate = frame_rate if odometry_frame_rate is None else odometry_frame_rate
         self.odometry_horizon = odometry_horizon
@@ -302,6 +303,7 @@ class MultiMP4DatasetMultiFrameIdxMappingNVIDIAPhysAI(OdometryHorizonMixin, Mult
             subsample_interval=subsample_interval,
             intrinsics_h5_path=intrinsics_h5_path,
             spatial_transform_config=spatial_transform_config,
+            validate_frame_rate_sample=validate_frame_rate_sample,
         )
 
         self.odo_file = h5py.File(odometry_h5_path, "r")

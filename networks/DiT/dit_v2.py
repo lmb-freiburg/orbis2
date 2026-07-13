@@ -74,6 +74,11 @@ class GlobalAdditiveConditioner(nn.Module):
             f"or [B, 1, H]. Condition `{condition_name}` produced {tuple(embedding.shape)}."
         )
 
+    def _combine_condition_embedding(self, conditioning, condition_embedding):
+        if torch.is_tensor(conditioning) and conditioning.ndim == 3 and condition_embedding.ndim == 2:
+            raise ValueError(f"{type(self).__name__} got per-frame conditioning {tuple(conditioning.shape)} but a global embedding {tuple(condition_embedding.shape)}; use PerFrameSequenceGlobalAdditiveConditioner for per-frame timestep conditioning.")
+        return conditioning + condition_embedding
+
     def forward(self, *, t=None, t_embedder=None, **condition_kwargs):
         assert (t is None) == (t_embedder is None)
         conditioning = 0 if t is None else _embed_timesteps_with(t, t_embedder)
@@ -84,7 +89,7 @@ class GlobalAdditiveConditioner(nn.Module):
             condition_embedding = self._reduce_global_condition_embedding(condition_name, condition_embedding)
             if not _is_compiling():
                 self._last_condition_embeddings[condition_name] = condition_embedding.detach()
-            conditioning = conditioning + condition_embedding
+            conditioning = self._combine_condition_embedding(conditioning, condition_embedding)
         return conditioning
 
 
@@ -176,6 +181,19 @@ class SequenceGlobalAdditiveConditioner(GlobalAdditiveConditioner):
         pos = self.positional_embeddings[condition_name][:k].unsqueeze(0)
         pos = pos.to(device=embedding.device, dtype=embedding.dtype)
         return embedding + pos
+
+
+class PerFrameSequenceGlobalAdditiveConditioner(SequenceGlobalAdditiveConditioner):
+    """
+    Same as SequenceGlobalAdditiveConditioner, but broadcasts global [B, H] condition
+    embeddings across frames when timestep conditioning is per-frame (conditioning is
+    [B, F, H] instead of [B, H]), instead of colliding F against B.
+    """
+
+    def _combine_condition_embedding(self, conditioning, condition_embedding):
+        if torch.is_tensor(conditioning) and conditioning.ndim == 3:
+            condition_embedding = condition_embedding.unsqueeze(1)  # [B, H] -> [B, 1, H]
+        return conditioning + condition_embedding
 
 
 class DiT(nn.Module):

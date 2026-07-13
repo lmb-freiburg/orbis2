@@ -358,7 +358,8 @@ class FlowMatchingObjectiveTeacherForcing(FlowMatchingObjective):
 
         supervision_target = self.get_supervision_target(target, noise, t)
         prediction_slice = slice(-self.module.num_pred_frames, None)
-        return model_input, t, supervision_target, prediction_slice
+        model_t = self.module.sampler._build_model_t(context, target_t, t)
+        return model_input, model_t, supervision_target, prediction_slice
 
 
 class FlowMatchingObjectiveDiffusionForcing(FlowMatchingObjective):

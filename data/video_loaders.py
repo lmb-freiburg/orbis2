@@ -301,7 +301,7 @@ class MultiHDF5DatasetMultiFrameIdxMapping(DatasetMultiFrameIdxMapping):
 
 
 class MultiMP4DatasetMultiFrameIdxMapping(DatasetMultiFrameIdxMapping):
-    def __init__(self, size, mp4_paths_file, num_frames, stored_data_frame_rate=5, frame_rate=5, aug="resize_center", backend=None, subsample_interval=None, intrinsics_h5_path=None, spatial_transform_config=None):
+    def __init__(self, size, mp4_paths_file, num_frames, stored_data_frame_rate=5, frame_rate=5, aug="resize_center", backend=None, subsample_interval=None, intrinsics_h5_path=None, spatial_transform_config=None, validate_frame_rate_sample=True):
         super().__init__()
         self.frame_interval = int(stored_data_frame_rate / frame_rate)
         self.frame_rate = frame_rate
@@ -340,7 +340,9 @@ class MultiMP4DatasetMultiFrameIdxMapping(DatasetMultiFrameIdxMapping):
             else:
                 raise ImportError("Either Decord or TorchCodec must be installed to use MultiMP4DatasetMultiFrameIdxMapping")
 
-        self._validate_frame_rate_sample()
+        self.validate_frame_rate_sample = validate_frame_rate_sample
+        if self.validate_frame_rate_sample:
+            self._validate_frame_rate_sample()
         self.scan_mp4_files_distributed()
 
         if self.backend == "decord":

@@ -1,3 +1,4 @@
+import logging
 import os
 
 import numpy as np
@@ -709,11 +710,20 @@ class L2EndpointConditionPreprocessor(ConditionPreprocessor):
         self.l2_pred_NFE = int(l2_pred_NFE)
         self.num_context_frames = int(num_context_frames)
         self.use_z_l2_start = bool(use_z_l2_start)
+        self.l2_predictor_config = l2_predictor_config
         self.l2_predictor = self._build_l2_predictor(l2_predictor_config)
         self.l2_predictor_encoder_branch = self._get_l2_predictor_encoder_branch(
             predictor=self.l2_predictor,
             predictor_config=l2_predictor_config,
         )
+
+    # --- BEGIN: rollout debug path info (safe to remove) ---
+    def get_l2_predictor_path_info(self):
+        """Return (exp_folder_name, ckpt_name) describing where the L2 predictor was loaded from."""
+        folder = os.path.expandvars(self.l2_predictor_config.folder)
+        ckpt_path = self.l2_predictor_config.ckpt_path if self.l2_predictor_config.ckpt_path else "checkpoints/last.ckpt"
+        return os.path.basename(os.path.normpath(folder)), os.path.basename(ckpt_path)
+    # --- END: rollout debug path info (safe to remove) ---
 
     @property
     def ae(self):
@@ -730,6 +740,7 @@ class L2EndpointConditionPreprocessor(ConditionPreprocessor):
     def _build_l2_predictor(self, cfg):
         folder = os.path.expandvars(cfg.folder)
         ckpt_path = cfg.ckpt_path if cfg.ckpt_path else "checkpoints/last.ckpt"
+        logging.info(f"Loading L2 checkpoint from {os.path.join(folder, ckpt_path)}")
         model_cfg = OmegaConf.load(os.path.join(folder, "config.yaml"))
         predictor = instantiate_from_config(model_cfg.model)
         state_dict = torch.load(

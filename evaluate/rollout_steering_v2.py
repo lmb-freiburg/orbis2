@@ -37,6 +37,22 @@ def _save_tensor_image(tensor, path):
     save_image((tensor.float().clamp(-1.0, 1.0) + 1.0) / 2.0, path)
 
 
+# --- BEGIN: l2_predictor path info in save dir (safe to remove) ---
+def _maybe_append_l2_predictor_debug_subdir(frames_dir, model, save_l2_debug):
+    """When --save_l2_debug is set, nest frames_dir under the L2 predictor's exp folder/ckpt names."""
+    if not save_l2_debug:
+        return frames_dir
+
+    condition_preprocessor = getattr(model, "condition_preprocessor", None)
+    get_path_info = getattr(condition_preprocessor, "get_l2_predictor_path_info", None)
+    if not callable(get_path_info):
+        return frames_dir
+
+    l2_folder_name, l2_ckpt_name = get_path_info()
+    return os.path.join(frames_dir, "l2_predictor", l2_folder_name, l2_ckpt_name)
+# --- END: l2_predictor path info in save dir (safe to remove) ---
+
+
 def _get_l2_debug_branch_and_scale(model):
     condition_preprocessor = getattr(model, "condition_preprocessor", None)
     if condition_preprocessor is None:
@@ -714,11 +730,6 @@ def maybe_apply_condition_preprocessor_scales(model, speed_scale, yaw_rate_scale
 @torch.no_grad()
 def generate_images(args, unknown_args):
     """Run v2 steering-conditioned rollout generation and save the resulting frames."""
-    if os.path.exists(args.frames_dir):
-        print("Folder exist, new images will be saved to the same folder, delete it if you want to start from scratch")
-    else:
-        os.makedirs(args.frames_dir)
-
     if args.seed > 0:
         torch.backends.cudnn.enable = False
         torch.backends.cudnn.deterministic = True
@@ -729,9 +740,17 @@ def generate_images(args, unknown_args):
     model = instantiate_from_config(config.model)
 
     _ckpt_result = model.load_state_dict(torch.load(args.ckpt)["state_dict"], strict=False)
-    assert _ckpt_result.missing_keys == [], _ckpt_result.missing_keys
+    _exempt_prefixes = tuple(getattr(model, "checkpoint_exempt_key_prefixes", ()))
+    _unexpected_missing_keys = [k for k in _ckpt_result.missing_keys if not k.startswith(_exempt_prefixes)]
+    assert _unexpected_missing_keys == [], _unexpected_missing_keys
     model = model.to(args.device)
     _ = model.eval()
+
+    args.frames_dir = _maybe_append_l2_predictor_debug_subdir(args.frames_dir, model, args.save_l2_debug)
+    if os.path.exists(args.frames_dir):
+        print("Folder exist, new images will be saved to the same folder, delete it if you want to start from scratch")
+    else:
+        os.makedirs(args.frames_dir)
 
     if args.compile:
         def _maybe_compile(module, attr):
@@ -747,6 +766,17 @@ def generate_images(args, unknown_args):
             _maybe_compile(_l2_predictor, 'ema_vit')
 
         logger.info("First rollout step will be slow (compilation). Subsequent steps reuse the graph.")
+
+    if args.compile and args.compile_artifacts:
+        if os.path.exists(args.compile_artifacts):
+            with open(args.compile_artifacts, "rb") as _f:
+                torch.compiler.load_cache_artifacts(_f.read())
+            logger.info(f"Loaded compile artifacts from {args.compile_artifacts!r}")
+        else:
+            logger.info(
+                f"Compile artifacts not found at {args.compile_artifacts!r}; "
+                "will save after the first batch."
+            )
 
     maybe_apply_condition_preprocessor_scales(model, args.speed_scale, args.yaw_rate_scale)
 
@@ -906,6 +936,13 @@ def generate_images(args, unknown_args):
 
         progress_bar.set_description(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.02f} GB")
 
+        if _batch_idx == 0 and args.compile and args.compile_artifacts and not os.path.exists(args.compile_artifacts):
+            _artifacts = torch.compiler.save_cache_artifacts()
+            if _artifacts is not None:
+                with open(args.compile_artifacts, "wb") as _f:
+                    _f.write(_artifacts[0])
+                logger.info(f"Saved compile artifacts to {args.compile_artifacts!r}")
+
 
 def main(args, unknown_args):
     """Entrypoint that launches rollout generation with resolved CLI arguments."""
@@ -987,11 +1024,24 @@ if __name__ == "__main__":
         choices=["default", "reduce-overhead", "max-autotune"],
         help="torch.compile mode. 'reduce-overhead' uses CUDA graphs; 'max-autotune' adds kernel autotuning.",
     )
+    parser.add_argument(
+        "--compile_artifacts",
+        type=str,
+        default=None,
+        help=(
+            "Path to torch.compiler cache artifacts (.pkl), relative to --exp_dir. "
+            "If the file exists, artifacts are loaded before rollout (fast startup). "
+            "If it does not exist, artifacts are saved after rollout (for future runs). "
+            "Only effective when --compile is True."
+        ),
+    )
 
     args, unknown = parser.parse_known_args()
 
     args.ckpt = os.path.join(args.exp_dir, args.ckpt)
     args.config = os.path.join(args.exp_dir, args.config)
+    if args.compile_artifacts:
+        args.compile_artifacts = os.path.join(args.exp_dir, args.compile_artifacts)
 
     if args.frames_dir is None:
         epoch, global_step = get_ckpt_epoch_step(args.ckpt)
