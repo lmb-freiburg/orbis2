@@ -1144,7 +1144,6 @@ class PredictorModule(pl.LightningModule):
         frame_rate=None,
         condition_kwargs=None,
         return_sample=False,
-        num_heun_steps=0,
     ):
         if sample_with_ema:
             self._sync_ema_stream()
@@ -1159,7 +1158,6 @@ class PredictorModule(pl.LightningModule):
             frame_rate=frame_rate,
             condition_kwargs=condition_kwargs,
             return_sample=return_sample,
-            num_heun_steps=num_heun_steps,
         )
 
     def _validate_rollout_context(self, x_0):
@@ -1213,7 +1211,6 @@ class PredictorModule(pl.LightningModule):
         decode_device=None,
         return_condition_history=False,
         num_condition_frames=None,
-        num_heun_steps=0,
     ):
         device = next(self.parameters()).device
         self._validate_rollout_context(x_0)
@@ -1250,7 +1247,6 @@ class PredictorModule(pl.LightningModule):
             condition_kwargs=condition_kwargs,
             decode_device=decode_device,
             return_condition_history=return_condition_history,
-            num_heun_steps=num_heun_steps,
         )
 
     @torch.no_grad()

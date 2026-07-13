@@ -8,7 +8,7 @@
             "name": "rollout_steering_v2: orbis_stage2_450M_vq_if_tok_rec",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/evaluate/rollout_steering_v2.py",
+            "program": "${workspaceFolder}/evaluate/rollout_demo_v2.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [

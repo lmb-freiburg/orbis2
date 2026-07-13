@@ -14,74 +14,79 @@ from omegaconf.errors import ConfigTypeError
 from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.utils import save_image
-from tqdm import tqdm
 
-from util import get_obj_from_str, instantiate_from_config
+from data.video_loaders import ClipAugmenter, PILFrameAdapter, ResizeCenterPolicy
+from util import instantiate_from_config
 
 
 logger = logging.getLogger(__name__)
 
-
-def get_ckpt_epoch_step(ckpt_path):
-    """Return the training epoch and global step stored in a checkpoint."""
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    epoch = ckpt["epoch"]
-    global_step = ckpt["global_step"]
-    return epoch, global_step
-
-
-def get_steering_source_string(steering_file, no_steering=False):
-    """Return a short label describing whether steering comes from data or a file."""
-    if no_steering:
-        return "none"
-    if steering_file is None:
-        return "from_data"
-    return os.path.splitext(os.path.basename(steering_file))[0]
-
-
-def get_steering_counterfactual_string(steering_file, speed_scale, yaw_rate_scale, no_steering=False):
-    source = get_steering_source_string(steering_file, no_steering=no_steering)
-    if float(speed_scale) == 1.0 and float(yaw_rate_scale) == 1.0:
-        return source
-    return f"{source}_speedx{float(speed_scale):g}_yawratex{float(yaw_rate_scale):g}"
-
-
-def maybe_reconfigure_validation_odometry_horizon(config, model, num_condition_frames, num_gen_frames, rollout_steps):
-    """Ask the validation dataset class to expose enough raw steering horizon for the rollout."""
-    condition_preprocessor = getattr(model, "condition_preprocessor", None)
-    if condition_preprocessor is None:
-        return
-
-    validation_config = config.data.params.validation
-    custom_required_steps = getattr(condition_preprocessor, "get_required_rollout_odometry_steps", None)
-    if callable(custom_required_steps):
-        required_odo_steps = custom_required_steps(
-            validation_params=validation_config.params,
-            num_condition_frames=num_condition_frames,
-            num_gen_frames=num_gen_frames,
-            rollout_steps=rollout_steps,
-        )
-        if required_odo_steps is None:
-            return
-    else:
-        max_condition_offset = condition_preprocessor.get_max_condition_odometry_offset()
-        if max_condition_offset is None:
-            return
-        required_odo_steps = num_condition_frames + num_gen_frames + max_condition_offset - 1
-
-    dataset_cls = get_obj_from_str(validation_config.target)
-    reconfigure = getattr(dataset_cls, "reconfigure_params_for_required_odometry_horizon", None)
-    if reconfigure is None:
-        raise TypeError(
-            f"Validation dataset {validation_config.target} must implement "
-            "`reconfigure_params_for_required_odometry_horizon(...)` for odometry-conditioned rollout."
-        )
-    reconfigure(validation_config.params, required_odo_steps=required_odo_steps)
+STEERING_FORMAT = "speed_yawrate"
 
 
 def get_rollout_future_frame_count(model, num_gen_frames):
     """Return the total number of future image frames produced by the rollout."""
     return int(num_gen_frames) * int(model.num_pred_frames)
+
+
+def resolve_context_image_size(args, config):
+    """Return (height, width) to resize context images to, from CLI args or the training config."""
+    if args.height is not None and args.width is not None:
+        return int(args.height), int(args.width)
+
+    try:
+        size = OmegaConf.select(config, "data.params.validation.params.size")
+    except ConfigTypeError:
+        size = None
+    if size is None:
+        size = config.data.params.train[0].params.size
+    size = (size, size) if isinstance(size, int) else tuple(size)
+
+    height = int(args.height) if args.height is not None else int(size[0])
+    width = int(args.width) if args.width is not None else int(size[1])
+    return height, width
+
+
+def load_context_images(image_paths, height, width, device):
+    """Load and preprocess raw image files into a [1, F, C, H, W] tensor in [-1, 1]."""
+    frames = [Image.open(path).convert("RGB") for path in image_paths]
+    augmenter = ClipAugmenter(PILFrameAdapter(), ResizeCenterPolicy((height, width)))
+    return augmenter(frames).unsqueeze(0).to(device)
+
+
+def load_steering_trajectory(steering_file, min_odo_steps, dtype, device):
+    """Load a raw [speed, yaw_rate] steering trajectory from a .npy/.csv file as a [1, T, 2] tensor."""
+    if not os.path.isfile(steering_file):
+        raise FileNotFoundError(f"Steering file {steering_file} does not exist")
+
+    if steering_file.endswith(".npy"):
+        loaded = np.load(steering_file)
+    elif steering_file.endswith(".csv"):
+        loaded = np.loadtxt(steering_file, delimiter=",")
+    else:
+        raise ValueError("Steering file must end with .npy or .csv")
+
+    if loaded.ndim != 2 or loaded.shape[1] != 2:
+        raise ValueError(
+            f"Steering file must contain [T, 2] (speed, yaw_rate) rows, got shape {tuple(loaded.shape)}"
+        )
+    if min_odo_steps is not None and loaded.shape[0] < min_odo_steps:
+        raise ValueError(
+            f"Steering file has too few timesteps: got {loaded.shape[0]}, expected at least {min_odo_steps}"
+        )
+
+    return torch.as_tensor(loaded, dtype=dtype, device=device).unsqueeze(0)
+
+
+def maybe_apply_condition_preprocessor_scales(model, speed_scale, yaw_rate_scale):
+    condition_preprocessor = getattr(model, "condition_preprocessor", None)
+    if condition_preprocessor is None:
+        return
+
+    if hasattr(condition_preprocessor, "speed_scale"):
+        condition_preprocessor.speed_scale = float(speed_scale)
+    if hasattr(condition_preprocessor, "yaw_rate_scale"):
+        condition_preprocessor.yaw_rate_scale = float(yaw_rate_scale)
 
 
 def _rgb_to_cv2_color(color):
@@ -283,121 +288,9 @@ def overlay_trajectory_on_images(images, visualization, mode="trajectory"):
     return images
 
 
-def load_steering_override(steering_file, expected_shape, dtype, device):
-    """Load a raw steering override from disk and broadcast it to the batch shape."""
-    if not os.path.isfile(steering_file):
-        raise FileNotFoundError(f"Steering override file {steering_file} does not exist")
-
-    if steering_file.endswith(".npy"):
-        loaded = np.load(steering_file)
-    elif steering_file.endswith(".csv"):
-        loaded = np.loadtxt(steering_file, delimiter=",")
-    else:
-        raise ValueError("Steering override file must end with .npy or .csv")
-
-    expected_b, expected_t, expected_d = expected_shape
-
-    if loaded.ndim == 2:
-        if loaded.shape[1] != expected_d:
-            raise ValueError(
-                f"Steering override feature dimension mismatch: got {loaded.shape[1]}, expected {expected_d}"
-            )
-        if loaded.shape[0] < expected_t:
-            raise ValueError(
-                f"Steering override has too few timesteps: got {loaded.shape[0]}, expected at least {expected_t}"
-            )
-        loaded = np.broadcast_to(loaded[:expected_t][None, :, :], (expected_b, expected_t, expected_d))
-    elif loaded.ndim == 3:
-        if loaded.shape[2] != expected_d:
-            raise ValueError(
-                f"Steering override feature dimension mismatch: got {loaded.shape[2]}, expected {expected_d}"
-            )
-        if loaded.shape[1] < expected_t:
-            raise ValueError(
-                f"Steering override has too few timesteps: got {loaded.shape[1]}, expected at least {expected_t}"
-            )
-        if loaded.shape[0] not in (1, expected_b):
-            raise ValueError(
-                f"Steering override batch dimension must be 1 or {expected_b}, got {loaded.shape[0]}"
-            )
-        loaded = loaded[:, :expected_t, :]
-        if loaded.shape[0] == 1:
-            loaded = np.broadcast_to(loaded, (expected_b, expected_t, expected_d))
-    else:
-        raise ValueError(
-            f"Steering override must have shape [T, D] or [B, T, D], got {tuple(loaded.shape)}"
-        )
-
-    return torch.as_tensor(loaded, dtype=dtype, device=device)
-
-
-def maybe_override_raw_steering(data_batch, steering_file):
-    """Replace the batch steering tensor with values loaded from an override file."""
-    if steering_file is None:
-        return data_batch
-
-    if "steering" not in data_batch:
-        raise KeyError("Batch does not contain `steering`, cannot apply steering override")
-
-    data_batch["steering"] = load_steering_override(
-        steering_file=steering_file,
-        expected_shape=tuple(data_batch["steering"].shape),
-        dtype=data_batch["steering"].dtype,
-        device=data_batch["steering"].device,
-    )
-    return data_batch
-
-
-def maybe_drop_raw_steering(data_batch, no_steering):
-    """Replace the batch steering tensor with NaNs to disable steering conditioning."""
-    if not no_steering:
-        return data_batch
-
-    if "steering" not in data_batch:
-        raise KeyError("Batch does not contain `steering`, cannot disable steering conditioning")
-
-    data_batch["steering"] = torch.full_like(data_batch["steering"], torch.nan)
-    return data_batch
-
-
-def validate_steering_source(data_batch, steering_file, no_steering):
-    """Raise if the batch carries only a placeholder steering tensor and no external source is given."""
-    is_placeholder = data_batch.get("_steering_placeholder")
-    if torch.is_tensor(is_placeholder):
-        is_placeholder = bool(is_placeholder.any().item())
-    if is_placeholder and steering_file is None and not no_steering:
-        raise ValueError(
-            "The validation dataset contains no steering data (placeholder only). "
-            "Provide --steering_file <path> to supply steering, or pass --no_steering "
-            "to run unconditionally."
-        )
-
-
-def move_batch_to_device(data_batch, device):
-    """Move all tensor batch entries to the requested device."""
-    moved = {}
-    for key, value in data_batch.items():
-        if torch.is_tensor(value):
-            moved[key] = value.to(device)
-        else:
-            moved[key] = value
-    return moved
-
-
-def maybe_apply_condition_preprocessor_scales(model, speed_scale, yaw_rate_scale):
-    condition_preprocessor = getattr(model, "condition_preprocessor", None)
-    if condition_preprocessor is None:
-        return
-
-    if hasattr(condition_preprocessor, "speed_scale"):
-        condition_preprocessor.speed_scale = float(speed_scale)
-    if hasattr(condition_preprocessor, "yaw_rate_scale"):
-        condition_preprocessor.yaw_rate_scale = float(yaw_rate_scale)
-
-
 @torch.no_grad()
 def generate_images(args, unknown_args):
-    """Run v2 steering-conditioned rollout generation and save the resulting frames."""
+    """Run a v2 steering-conditioned rollout from raw context images and save the resulting frames."""
     if args.seed > 0:
         torch.backends.cudnn.enable = False
         torch.backends.cudnn.deterministic = True
@@ -414,10 +307,10 @@ def generate_images(args, unknown_args):
     model = model.to(args.device)
     _ = model.eval()
 
-    if os.path.exists(args.frames_dir):
-        print("Folder exist, new images will be saved to the same folder, delete it if you want to start from scratch")
+    if os.path.exists(args.output_dir):
+        print("Folder exists, new images will be saved to the same folder, delete it if you want to start from scratch")
     else:
-        os.makedirs(args.frames_dir)
+        os.makedirs(args.output_dir)
 
     if args.compile:
         def _maybe_compile(module, attr):
@@ -447,135 +340,91 @@ def generate_images(args, unknown_args):
 
     maybe_apply_condition_preprocessor_scales(model, args.speed_scale, args.yaw_rate_scale)
 
-    # Read num_frames from training config before val_config overrides it.
-    # Training configs may have no validation section, or validation may be a list (not a dict),
-    # in either case fall back to the first train dataset.
-    try:
-        _base_num_frames = OmegaConf.select(config, "data.params.validation.params.num_frames")
-    except ConfigTypeError:
-        _base_num_frames = None
-    if _base_num_frames is None:
-        _base_num_frames = config.data.params.train[0].params.num_frames
-    num_condition_frames = _base_num_frames - model.num_pred_frames
-
-    if args.val_config is not None:
-        config = OmegaConf.merge(OmegaConf.load(args.val_config), OmegaConf.from_dotlist(unknown_args))
+    height, width = resolve_context_image_size(args, config)
+    num_condition_frames = len(args.images)
     num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
-    maybe_reconfigure_validation_odometry_horizon(
-        config=config,
-        model=model,
-        num_condition_frames=num_condition_frames,
-        num_gen_frames=num_future_frames,
-        rollout_steps=args.num_gen_frames,
-    )
-    if hasattr(config.data.params, "train"):
-        del config.data.params.train
 
-    data = instantiate_from_config(config.data)
-    data.prepare_data()
-    data.setup()
-    val_loader = data.val_dataloader()
+    cond_x = load_context_images(args.images, height, width, args.device)
+    frame_rate = torch.tensor(float(args.frame_rate), device=args.device)
+    data_batch = {"images": cond_x, "frame_rate": frame_rate}
 
-    logger.info(
-        f"Steering source: {get_steering_source_string(args.steering_file, no_steering=args.no_steering)}"
-    )
+    if args.steering_file is not None:
+        get_required_steps = getattr(model.condition_preprocessor, "get_required_rollout_odometry_steps", None)
+        min_odo_steps = None
+        if callable(get_required_steps):
+            min_odo_steps = get_required_steps(
+                validation_params=None,
+                num_condition_frames=num_condition_frames,
+                num_gen_frames=num_future_frames,
+                rollout_steps=args.num_gen_frames,
+            )
+        data_batch["steering"] = load_steering_trajectory(
+            args.steering_file, min_odo_steps, dtype=cond_x.dtype, device=args.device
+        )
+        data_batch["steering_format"] = STEERING_FORMAT
+
+    condition_kwargs = model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout")
+
+    logger.info(f"Steering source: {'none' if args.steering_file is None else args.steering_file}")
     logger.info(f"Steering scales: speed={args.speed_scale:g}, yaw_rate={args.yaw_rate_scale:g}")
-    logger.info(f"Saving generated images to {args.frames_dir}")
+    logger.info(f"Saving generated images to {args.output_dir}")
 
-    sample_idx = 0
-    progress_bar = tqdm(range(len(val_loader.dataset) // val_loader.batch_size))
-    loader_iter = iter(val_loader)
-
-    for _batch_idx, _ in enumerate(progress_bar):
-        data_batch = next(loader_iter)
-        if args.num_videos is not None and sample_idx >= args.num_videos:
-            break
-
-        data_batch = move_batch_to_device(data_batch, args.device)
-        validate_steering_source(data_batch, args.steering_file, args.no_steering)
-        data_batch = maybe_override_raw_steering(data_batch, args.steering_file)
-        data_batch = maybe_drop_raw_steering(data_batch, args.no_steering)
-
-        x = data_batch["images"]
-        cond_x = x[:, :num_condition_frames]
-        frame_rate = data_batch.get("frame_rate")
-        rollout_context = {"images": cond_x}
-        for key, value in data_batch.items():
-            if key != "images" and key != "steering":
-                rollout_context[key] = value
-        condition_batch = dict(data_batch)
-        condition_batch["images"] = cond_x
-        condition_kwargs = model.condition_preprocessor.get_condition_kwargs_from_batch(
-            condition_batch,
-            split="rollout",
+    autocast_enabled = args.device.startswith("cuda")
+    with torch.autocast(dtype=torch.float16, device_type="cuda", enabled=autocast_enabled):
+        _latents, gen_frames = model.roll_out(
+            x_0={"images": cond_x},
+            num_gen_frames=args.num_gen_frames,
+            latent_input=False,
+            NFE=args.num_steps,
+            eta=args.eta,
+            sample_with_ema=args.evaluate_ema,
+            num_samples=cond_x.size(0),
+            frame_rate=frame_rate,
+            condition_kwargs=condition_kwargs,
+            decode_device=args.decode_device,
+            num_condition_frames=cond_x.size(1),
         )
 
-        autocast_enabled = args.device.startswith("cuda")
-        with torch.autocast(dtype=torch.float16, device_type="cuda", enabled=autocast_enabled):
-            _latents, gen_frames = model.roll_out(
-                x_0=rollout_context,
-                num_gen_frames=args.num_gen_frames,
-                latent_input=False,
-                NFE=args.num_steps,
-                eta=args.eta,
-                sample_with_ema=args.evaluate_ema,
-                num_samples=cond_x.size(0),
-                frame_rate=frame_rate,
-                condition_kwargs=condition_kwargs,
-                decode_device=args.decode_device,
-                num_condition_frames=cond_x.size(1),
-            )
+    if args.vis_mode in {"trajectory", "trajectory_ego"}:
+        overlay_trajectory = model.condition_preprocessor.get_rollout_visualization_trajectory(
+            condition_kwargs=model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout"),
+            num_condition_frames=num_condition_frames,
+            num_gen_steps=args.num_gen_frames,
+            num_pred_frames=model.num_pred_frames,
+        )
+        if overlay_trajectory is not None:
+            gen_frames = overlay_trajectory_on_images(gen_frames, overlay_trajectory, mode=args.vis_mode)
 
-        if args.vis_mode in {"trajectory", "trajectory_ego"}:
-            overlay_trajectory = model.condition_preprocessor.get_rollout_visualization_trajectory(
-                condition_kwargs=model.condition_preprocessor.get_condition_kwargs_from_batch(
-                    condition_batch,
-                    split="rollout",
-                ),
-                num_condition_frames=num_condition_frames,
-                num_gen_steps=args.num_gen_frames,
-                num_pred_frames=model.num_pred_frames,
-            )
-            if overlay_trajectory is not None:
-                gen_frames = overlay_trajectory_on_images(gen_frames, overlay_trajectory, mode=args.vis_mode)
+    # Release rollout-time latent state before CPU-side file I/O.
+    del _latents, condition_kwargs, cond_x
 
-        # Release rollout-time latent state before CPU-side file I/O.
-        del _latents, condition_kwargs, rollout_context, condition_batch, cond_x
+    frames_dir = os.path.join(args.output_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    for f in range(gen_frames.shape[1]):
+        save_image(
+            (gen_frames[0, f] + 1.0) / 2.0,
+            os.path.join(frames_dir, f"frame_{f:04d}.jpg"),
+        )
 
-        for sample_in_batch_idx in range(gen_frames.shape[0]):
-            subfolder_path_fake = os.path.join(args.frames_dir, "fake_images", f"sequence_{sample_idx:04d}")
-            subfolder_path_gifs = os.path.join(args.frames_dir, "gen_gifs")
-            if not os.path.exists(subfolder_path_fake):
-                os.makedirs(subfolder_path_fake)
-            if not os.path.exists(subfolder_path_gifs):
-                os.makedirs(subfolder_path_gifs)
+    imageio.mimsave(
+        os.path.join(args.output_dir, "rollout.gif"),
+        [
+            np.array(Image.open(os.path.join(frames_dir, f"frame_{f:04d}.jpg")))
+            for f in range(gen_frames.shape[1])
+        ],
+        fps=args.frame_rate,
+        loop=0,
+    )
 
-            for f in range(gen_frames.shape[1]):
-                save_image(
-                    (gen_frames[sample_in_batch_idx, f] + 1.0) / 2.0,
-                    os.path.join(subfolder_path_fake, f"frame_{f:04d}.jpg"),
-                )
+    if args.device.startswith("cuda"):
+        logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.02f} GB")
 
-            imageio.mimsave(
-                os.path.join(subfolder_path_gifs, f"sequence_{sample_idx:04d}.gif"),
-                [
-                    np.array(Image.open(os.path.join(subfolder_path_fake, f"frame_{f:04d}.jpg")))
-                    for f in range(gen_frames.shape[1])
-                ],
-                fps=args.frame_rate if frame_rate is not None else 7,
-                loop=0,
-            )
-
-            sample_idx += 1
-
-        progress_bar.set_description(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.02f} GB")
-
-        if _batch_idx == 0 and args.compile and args.compile_artifacts and not os.path.exists(args.compile_artifacts):
-            _artifacts = torch.compiler.save_cache_artifacts()
-            if _artifacts is not None:
-                with open(args.compile_artifacts, "wb") as _f:
-                    _f.write(_artifacts[0])
-                logger.info(f"Saved compile artifacts to {args.compile_artifacts!r}")
+    if args.compile and args.compile_artifacts and not os.path.exists(args.compile_artifacts):
+        _artifacts = torch.compiler.save_cache_artifacts()
+        if _artifacts is not None:
+            with open(args.compile_artifacts, "wb") as _f:
+                _f.write(_artifacts[0])
+            logger.info(f"Saved compile artifacts to {args.compile_artifacts!r}")
 
 
 def main(args, unknown_args):
@@ -599,15 +448,22 @@ if __name__ == "__main__":
     parser.add_argument("--exp_dir", type=str, default=None, help="Path to the experiment directory, where the config and checkpoints are stored")
     parser.add_argument("--ckpt", type=str, default="checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the config file, relative to exp_dir")
-    parser.add_argument("--val_config", type=str, default=None, help="Path to the validation data config file")
+    parser.add_argument(
+        "--images",
+        type=str,
+        nargs="+",
+        required=True,
+        help="Paths to the context image files, in temporal order (oldest first).",
+    )
+    parser.add_argument("--height", type=int, default=None, help="Height to resize context images to. Defaults to the training config's size.")
+    parser.add_argument("--width", type=int, default=None, help="Width to resize context images to. Defaults to the training config's size.")
     parser.add_argument(
         "--num_gen_frames",
         type=int,
         default=1,
         help="Number of rollout steps to generate; each step predicts `model.num_pred_frames` future frames.",
     )
-    parser.add_argument("--frames_dir", type=str, default=None, help="Path of the folder for the fake frames, relative to exp_dir")
-    parser.add_argument("--num_videos", type=int, default=None, help="Number of videos to generate")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the generated frames and GIF to.")
     parser.add_argument(
         "--vis_mode",
         type=str,
@@ -615,16 +471,10 @@ if __name__ == "__main__":
         choices=["none", "trajectory", "trajectory_ego"],
         help="Visualization mode",
     )
-    parser.add_argument("--steering_file", type=str, default=None, help="Optional .npy or .csv file used to replace raw batch steering")
-    parser.add_argument(
-        "--no_steering",
-        type=str2bool,
-        default=False,
-        help="Replace the raw steering sequence with NaNs before conditioning.",
-    )
+    parser.add_argument("--steering_file", type=str, default=None, help="Optional .npy or .csv trajectory file (columns: speed, yaw_rate) used as steering input. If omitted, the rollout is unconditional.")
     parser.add_argument("--speed_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw speed conditioning")
     parser.add_argument("--yaw_rate_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw yaw-rate conditioning")
-    parser.add_argument("--frame_rate", type=int, default=7, help="Frame rate for the generated GIFs")
+    parser.add_argument("--frame_rate", type=float, default=7, help="Frame rate (Hz) of the input context images, used for steering alignment and as the generated GIF's fps.")
 
     parser.add_argument("--seed", type=int, default=42, help="Seed for reproducibility")
     parser.add_argument("--device", type=str, default="cuda", help="Device")
@@ -668,17 +518,5 @@ if __name__ == "__main__":
     args.config = os.path.join(args.exp_dir, args.config)
     if args.compile_artifacts:
         args.compile_artifacts = os.path.join(args.exp_dir, args.compile_artifacts)
-
-    if args.frames_dir is None:
-        epoch, global_step = get_ckpt_epoch_step(args.ckpt)
-        args.frames_dir = os.path.join(
-            "gen_rollout",
-            os.path.basename(args.val_config).split(".")[0] if args.val_config is not None else "default_data",
-            f"ep{epoch}iter{global_step}_{args.num_steps}steps",
-            f"steering_{get_steering_counterfactual_string(args.steering_file, args.speed_scale, args.yaw_rate_scale, no_steering=args.no_steering)}",
-            f"vis_{args.vis_mode}",
-            f"seed{args.seed}",
-        )
-    args.frames_dir = os.path.join(args.exp_dir, args.frames_dir)
 
     main(args, unknown)
