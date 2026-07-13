@@ -15,11 +15,13 @@
                 "--exp_dir",
                 "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/", "--config=config_distill.yaml",
                 "--video=/data/nxtaimraid03/datasets/nvidia_physicalAI_AV/camera/nvidia_minYR0.05_10Hz_288x512_GoP8/0fd6e28d-80c8-4597-b87f-a53a592b584c.camera_front_wide_120fov.mp4",
-                "--l1_frame_rate=10",
                 
+                "--steering_file=/data/nxtaimraid02/galessos/repos/orbis/steering_values_fromfile/curvature_eval/left.csv",
+                "--l1_frame_rate=10",
+
                 "--output_dir=scratch/rollout",
                 "--num_steps=30",
-                "--num_gen_frames=20",
+                "--num_gen_frames=10",
                 "--use_ema=True",
                 "--classifier_free_guidance=0.0",
                 "--num_videos=16",

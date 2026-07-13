@@ -526,7 +526,7 @@ def generate_images(args, unknown_args):
             eta=args.eta,
             sample_with_ema=args.evaluate_ema,
             num_samples=l1_tensor.size(0),
-            frame_rate=frame_rate,
+            frame_rate=frame_rate.unsqueeze(0),
             condition_kwargs=condition_kwargs,
             decode_device=args.decode_device,
             num_condition_frames=l1_tensor.size(1),
