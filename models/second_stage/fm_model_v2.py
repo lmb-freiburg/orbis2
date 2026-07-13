@@ -620,6 +620,112 @@ class FlowMatchingSamplerTeacherForcing(FlowMatchingSampler):
         )
         return torch.cat([context_t, target_t_full], dim=1)
 
+    def _validate_num_heun_steps(self, num_heun_steps, NFE, eta):
+        if isinstance(num_heun_steps, bool) or not isinstance(num_heun_steps, int):
+            raise TypeError(
+                f"num_heun_steps must be an int, got {type(num_heun_steps).__name__}."
+            )
+        if not 0 <= num_heun_steps <= NFE:
+            raise ValueError(
+                f"num_heun_steps must be in [0, NFE] (NFE={NFE}), got {num_heun_steps}."
+            )
+        if num_heun_steps > 0 and eta != 0.0:
+            raise ValueError(
+                "Heun sampling (num_heun_steps > 0) is deterministic-only and cannot "
+                f"be combined with the stochastic SDE term; got eta={eta}. "
+                "Set eta=0.0 when num_heun_steps > 0."
+            )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        images=None,
+        latent=False,
+        eta=0.0,
+        NFE=20,
+        sample_with_ema=True,
+        num_samples=8,
+        frame_rate=None,
+        condition_kwargs=None,
+        return_sample=False,
+        num_heun_steps=0,
+    ):
+        self._validate_num_heun_steps(num_heun_steps, NFE, eta)
+        net, device, context, model_condition_kwargs, frame_rate, target_t = self._prepare_sampling_state(
+            images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
+        )
+        t_steps = self._build_t_steps(NFE, device)
+        for i in range(NFE):
+            if i < num_heun_steps:
+                target_t = self._heun_step(
+                    net, context, target_t, t_steps[i], t_steps[i + 1], frame_rate, model_condition_kwargs
+                )
+            else:
+                t_scalar = t_steps[i].repeat(target_t.shape[0])
+                neg_v = self._eval_velocity(net, context, target_t, t_scalar, frame_rate, model_condition_kwargs)
+                target_t = self._euler_maruyama_step(target_t, neg_v, t_steps[i], t_steps[i + 1], eta)
+
+        if return_sample:
+            return target_t, self.module.decode_frames(target_t.clone())
+        return target_t
+
+    @torch.no_grad()
+    def roll_out(
+        self,
+        x_0,
+        num_gen_frames=25,
+        latent_input=True,
+        eta=0.0,
+        NFE=20,
+        sample_with_ema=True,
+        num_samples=8,
+        frame_rate=None,
+        condition_kwargs=None,
+        decode_device=None,
+        return_condition_history=False,
+        num_heun_steps=0,
+    ):
+        # num_heun_steps validation happens inside self.sample() on the first
+        # generated block, before any expensive work in this loop.
+        context = x_0.clone() if latent_input else self.module.encode_frames(x_0)
+        all_latents = context.clone()
+        condition_kwargs = self.module.condition_preprocessor.prepare_condition_kwargs(
+            condition_kwargs,
+            batch_size=context.size(0),
+            device=context.device,
+            split="rollout",
+        )
+        condition_history = []
+
+        for _idx in tqdm(range(num_gen_frames)):
+            if return_condition_history:
+                condition_history.append(self._snapshot_condition_kwargs(condition_kwargs))
+            prediction = self.sample(
+                images=context,
+                latent=True,
+                eta=eta,
+                NFE=NFE,
+                sample_with_ema=sample_with_ema,
+                num_samples=num_samples,
+                frame_rate=frame_rate,
+                condition_kwargs=condition_kwargs,
+                num_heun_steps=num_heun_steps,
+            )
+            all_latents = torch.cat([all_latents, prediction[:, -self.module.num_pred_frames :]], dim=1)
+            if _idx < num_gen_frames - 1:
+                condition_kwargs = self.module.condition_preprocessor.update_rollout_condition_kwargs(
+                    condition_kwargs,
+                    prediction=prediction,
+                    context=context,
+                    step_idx=_idx,
+                )
+            context = self._update_rollout_context(context, prediction)
+
+        result = (all_latents, self.module.decode_frames(all_latents, output_device=decode_device))
+        if return_condition_history:
+            return result + (condition_history,)
+        return result
+
 
 class FlowMatchingSamplerDiffusionForcing(FlowMatchingSampler):
     """
@@ -1038,10 +1144,11 @@ class PredictorModule(pl.LightningModule):
         frame_rate=None,
         condition_kwargs=None,
         return_sample=False,
+        num_heun_steps=0,
     ):
         if sample_with_ema:
             self._sync_ema_stream()
-            
+
         return self.sampler.sample(
             images=images,
             latent=latent,
@@ -1052,6 +1159,7 @@ class PredictorModule(pl.LightningModule):
             frame_rate=frame_rate,
             condition_kwargs=condition_kwargs,
             return_sample=return_sample,
+            num_heun_steps=num_heun_steps,
         )
 
     def _validate_rollout_context(self, x_0):
@@ -1105,6 +1213,7 @@ class PredictorModule(pl.LightningModule):
         decode_device=None,
         return_condition_history=False,
         num_condition_frames=None,
+        num_heun_steps=0,
     ):
         device = next(self.parameters()).device
         self._validate_rollout_context(x_0)
@@ -1141,6 +1250,7 @@ class PredictorModule(pl.LightningModule):
             condition_kwargs=condition_kwargs,
             decode_device=decode_device,
             return_condition_history=return_condition_history,
+            num_heun_steps=num_heun_steps,
         )
 
     @torch.no_grad()

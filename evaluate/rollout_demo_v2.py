@@ -414,7 +414,6 @@ def generate_images(args, unknown_args):
     model = model.to(args.device)
     _ = model.eval()
 
-    args.frames_dir = _maybe_append_l2_predictor_debug_subdir(args.frames_dir, model, args.save_l2_debug)
     if os.path.exists(args.frames_dir):
         print("Folder exist, new images will be saved to the same folder, delete it if you want to start from scratch")
     else:
@@ -462,8 +461,6 @@ def generate_images(args, unknown_args):
     if args.val_config is not None:
         config = OmegaConf.merge(OmegaConf.load(args.val_config), OmegaConf.from_dotlist(unknown_args))
     num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
-    if args.save_real:
-        config.data.params.validation.params.num_frames = num_condition_frames + num_future_frames
     maybe_reconfigure_validation_odometry_horizon(
         config=config,
         model=model,
@@ -609,16 +606,8 @@ if __name__ == "__main__":
         default=1,
         help="Number of rollout steps to generate; each step predicts `model.num_pred_frames` future frames.",
     )
-    parser.add_argument("--frames_dir", type=str, default=None, help="Path of the folder for the real and fake frames, relative to exp_dir")
-    parser.add_argument("--save_real", type=str2bool, default=True, help="Save real frames in the same folder as fake frames")
+    parser.add_argument("--frames_dir", type=str, default=None, help="Path of the folder for the fake frames, relative to exp_dir")
     parser.add_argument("--num_videos", type=int, default=None, help="Number of videos to generate")
-    parser.add_argument("--save_l2_debug", type=str2bool, default=False, help="Save decoded L2 context/start/end conditioning for each rollout step")
-    parser.add_argument(
-        "--save_condition_debug",
-        type=str2bool,
-        default=False,
-        help="Save raw steering and delegated condition-preprocessor state for each rollout sample",
-    )
     parser.add_argument(
         "--vis_mode",
         type=str,
