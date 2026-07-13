@@ -14,12 +14,8 @@
             "args": [
                 "--exp_dir",
                 "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/", "--config=config_distill.yaml",
-                "--images",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/gen_rollout/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate/ep0iter168000_30steps/steering_none/vis_none/seed61/l2_predictor/2026-07-11T13-40-04_distill_cd_l2_v2_450M_288x512_2hz_5ctx_sameHzAsJupiter_lmbgpu20/last.ckpt/real_images/sequence_0000/frame_0000.jpg",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/gen_rollout/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate/ep0iter168000_30steps/steering_none/vis_none/seed61/l2_predictor/2026-07-11T13-40-04_distill_cd_l2_v2_450M_288x512_2hz_5ctx_sameHzAsJupiter_lmbgpu20/last.ckpt/real_images/sequence_0000/frame_0001.jpg",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/gen_rollout/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate/ep0iter168000_30steps/steering_none/vis_none/seed61/l2_predictor/2026-07-11T13-40-04_distill_cd_l2_v2_450M_288x512_2hz_5ctx_sameHzAsJupiter_lmbgpu20/last.ckpt/real_images/sequence_0000/frame_0002.jpg",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/gen_rollout/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate/ep0iter168000_30steps/steering_none/vis_none/seed61/l2_predictor/2026-07-11T13-40-04_distill_cd_l2_v2_450M_288x512_2hz_5ctx_sameHzAsJupiter_lmbgpu20/last.ckpt/real_images/sequence_0000/frame_0003.jpg",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/gen_rollout/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate/ep0iter168000_30steps/steering_none/vis_none/seed61/l2_predictor/2026-07-11T13-40-04_distill_cd_l2_v2_450M_288x512_2hz_5ctx_sameHzAsJupiter_lmbgpu20/last.ckpt/real_images/sequence_0000/frame_0004.jpg",
+                "--video=/data/nxtaimraid03/datasets/nvidia_physicalAI_AV/camera/nvidia_minYR0.05_10Hz_288x512_GoP8/0fd6e28d-80c8-4597-b87f-a53a592b584c.camera_front_wide_120fov.mp4",
+                "--l1_frame_rate=10",
                 
                 "--output_dir=scratch/rollout",
                 "--num_steps=30",
