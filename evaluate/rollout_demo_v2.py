@@ -206,6 +206,18 @@ def load_steering_trajectory(steering_file, min_odo_steps, dtype, device):
     return torch.as_tensor(loaded, dtype=dtype, device=device).unsqueeze(0)
 
 
+def make_unconditional_steering(min_odo_steps, dtype, device):
+    """Build an all-NaN [1, T, 2] steering placeholder, the framework's own 'no steering data' signal."""
+    if min_odo_steps is None:
+        raise ValueError(
+            "Cannot run unconditionally without --steering_file: the loaded condition_preprocessor "
+            "could not report a required odometry length (`get_required_rollout_odometry_steps` "
+            "returned None), so there is no safe length to build a NaN placeholder at. "
+            "Supply --steering_file explicitly."
+        )
+    return torch.full((1, int(min_odo_steps), 2), float("nan"), dtype=dtype, device=device)
+
+
 def maybe_apply_condition_preprocessor_scales(model, speed_scale, yaw_rate_scale):
     condition_preprocessor = getattr(model, "condition_preprocessor", None)
     if condition_preprocessor is None:
@@ -494,20 +506,22 @@ def generate_images(args, unknown_args):
     frame_rate = torch.tensor(float(args.l1_frame_rate), device=args.device)
     data_batch = {"images": l1_tensor, "l2_context": l2_tensor, "frame_rate": frame_rate}
 
+    get_required_steps = getattr(model.condition_preprocessor, "get_required_rollout_odometry_steps", None)
+    min_odo_steps = None
+    if callable(get_required_steps):
+        min_odo_steps = get_required_steps(
+            validation_params=None,
+            num_condition_frames=l1_context_frames,
+            num_gen_frames=num_future_frames,
+            rollout_steps=args.num_gen_frames,
+        )
     if args.steering_file is not None:
-        get_required_steps = getattr(model.condition_preprocessor, "get_required_rollout_odometry_steps", None)
-        min_odo_steps = None
-        if callable(get_required_steps):
-            min_odo_steps = get_required_steps(
-                validation_params=None,
-                num_condition_frames=l1_context_frames,
-                num_gen_frames=num_future_frames,
-                rollout_steps=args.num_gen_frames,
-            )
         data_batch["steering"] = load_steering_trajectory(
             args.steering_file, min_odo_steps, dtype=l1_tensor.dtype, device=args.device
         )
-        data_batch["steering_format"] = STEERING_FORMAT
+    else:
+        data_batch["steering"] = make_unconditional_steering(min_odo_steps, dtype=l1_tensor.dtype, device=args.device)
+    data_batch["steering_format"] = STEERING_FORMAT
 
     condition_kwargs = model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout")
 
