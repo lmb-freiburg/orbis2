@@ -413,29 +413,8 @@ class FlowMatchingSampler:
     def _extract_target_prediction(self, pred):
         return pred[:, -self.module.num_pred_frames :]
 
-    def _snapshot_condition_kwargs(self, condition_kwargs):
-        if not condition_kwargs:
-            return {}
-        snapshot = {}
-        for key, value in condition_kwargs.items():
-            if torch.is_tensor(value):
-                snapshot[key] = value.detach().cpu().clone()
-            else:
-                snapshot[key] = value
-        return snapshot
-
-    @torch.no_grad()
-    def sample(
-        self,
-        images=None,
-        latent=False,
-        eta=0.0,
-        NFE=20,
-        sample_with_ema=True,
-        num_samples=8,
-        frame_rate=None,
-        condition_kwargs=None,
-        return_sample=False,
+    def _prepare_sampling_state(
+        self, images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
     ):
         net = self._get_net(sample_with_ema)
         device = next(net.parameters()).device
@@ -462,28 +441,74 @@ class FlowMatchingSampler:
             input_w,
             device=device,
         )
+        return net, device, context, model_condition_kwargs, frame_rate, target_t
 
+    def _build_t_steps(self, NFE, device):
         if not 0.0 <= self.integration_t_eps < 0.5:
             raise ValueError(
                 "integration_t_eps must be in [0, 0.5), "
                 f"got {self.integration_t_eps}."
             )
-        t_steps = torch.linspace(
+        return torch.linspace(
             1.0 - self.integration_t_eps,
             self.integration_t_eps,
             NFE + 1,
             device=device,
         )
+
+    def _eval_velocity(self, net, context, target_t, t_scalar, frame_rate, model_condition_kwargs):
+        model_input = self._build_model_inputs(context, target_t, t_scalar)
+        model_t = self._build_model_t(context, target_t, t_scalar)
+        pred = net(model_input, t=model_t * self.timescale, frame_rate=frame_rate, **model_condition_kwargs)
+        return self._extract_target_prediction(pred)
+
+    def _euler_maruyama_step(self, target_t, neg_v, t_i, t_ip1, eta):
+        dt = t_i - t_ip1
+        dw = torch.randn(target_t.size(), device=target_t.device) * torch.sqrt(dt)
+        diffusion = dt
+        return target_t + neg_v * dt + eta * torch.sqrt(2 * diffusion) * dw
+
+    def _heun_step(self, net, context, target_t, t_i, t_ip1, frame_rate, model_condition_kwargs):
+        t_i_scalar = t_i.repeat(target_t.shape[0])
+        t_ip1_scalar = t_ip1.repeat(target_t.shape[0])
+        dt = t_i - t_ip1
+        v1 = self._eval_velocity(net, context, target_t, t_i_scalar, frame_rate, model_condition_kwargs)
+        x_pred = target_t + v1 * dt
+        v2 = self._eval_velocity(net, context, x_pred, t_ip1_scalar, frame_rate, model_condition_kwargs)
+        return target_t + 0.5 * (v1 + v2) * dt
+
+    def _snapshot_condition_kwargs(self, condition_kwargs):
+        if not condition_kwargs:
+            return {}
+        snapshot = {}
+        for key, value in condition_kwargs.items():
+            if torch.is_tensor(value):
+                snapshot[key] = value.detach().cpu().clone()
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    @torch.no_grad()
+    def sample(
+        self,
+        images=None,
+        latent=False,
+        eta=0.0,
+        NFE=20,
+        sample_with_ema=True,
+        num_samples=8,
+        frame_rate=None,
+        condition_kwargs=None,
+        return_sample=False,
+    ):
+        net, device, context, model_condition_kwargs, frame_rate, target_t = self._prepare_sampling_state(
+            images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
+        )
+        t_steps = self._build_t_steps(NFE, device)
         for i in range(NFE):
             t_scalar = t_steps[i].repeat(target_t.shape[0])
-            model_input = self._build_model_inputs(context, target_t, t_scalar)
-            model_t = self._build_model_t(context, target_t, t_scalar)
-            pred = net(model_input, t=model_t * self.timescale, frame_rate=frame_rate, **model_condition_kwargs)
-            neg_v = self._extract_target_prediction(pred)
-            dt = t_steps[i] - t_steps[i + 1]
-            dw = torch.randn(target_t.size(), device=target_t.device) * torch.sqrt(dt)
-            diffusion = dt
-            target_t = target_t + neg_v * dt + eta * torch.sqrt(2 * diffusion) * dw
+            neg_v = self._eval_velocity(net, context, target_t, t_scalar, frame_rate, model_condition_kwargs)
+            target_t = self._euler_maruyama_step(target_t, neg_v, t_steps[i], t_steps[i + 1], eta)
 
         if return_sample:
             return target_t, self.module.decode_frames(target_t.clone())

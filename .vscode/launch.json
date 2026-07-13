@@ -15,7 +15,7 @@
                 "--exp_dir",
                 "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/",
                 "--config=config_distill.yaml",
-                "--val_config=configs/data/L1L2/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate.yaml",
+                "--val_config=/data/nxtaimraid02/galessos/repos/orbis/configs/data/L1L2/nuPlan_turns_10HzL1_2HzL2_288x512_speed_yawrate.yaml",
                 "--num_steps=30",
                 "--num_gen_frames=40",
                 "--no_steering=True",
@@ -29,7 +29,10 @@
                 "--compile=True",
                 "--compile_artifacts=compile_cache.pkl",
                 "data.params.batch_size=1"
-            ]
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "1",
+            }
         }
     ]
 }

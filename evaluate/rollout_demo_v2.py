@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import sys
 import imageio
@@ -17,9 +16,7 @@ from pytorch_lightning import seed_everything
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from data.utils import get_trajectory_from_speeds_and_yaw_rates_batch
 from util import get_obj_from_str, instantiate_from_config
-from models.second_stage.fm_model_v2 import _decode_selected_if_branch
 
 
 logger = logging.getLogger(__name__)
@@ -31,335 +28,6 @@ def get_ckpt_epoch_step(ckpt_path):
     epoch = ckpt["epoch"]
     global_step = ckpt["global_step"]
     return epoch, global_step
-
-
-def _save_tensor_image(tensor, path):
-    save_image((tensor.float().clamp(-1.0, 1.0) + 1.0) / 2.0, path)
-
-
-# --- BEGIN: l2_predictor path info in save dir (safe to remove) ---
-def _maybe_append_l2_predictor_debug_subdir(frames_dir, model, save_l2_debug):
-    """When --save_l2_debug is set, nest frames_dir under the L2 predictor's exp folder/ckpt names."""
-    if not save_l2_debug:
-        return frames_dir
-
-    condition_preprocessor = getattr(model, "condition_preprocessor", None)
-    get_path_info = getattr(condition_preprocessor, "get_l2_predictor_path_info", None)
-    if not callable(get_path_info):
-        return frames_dir
-
-    l2_folder_name, l2_ckpt_name = get_path_info()
-    return os.path.join(frames_dir, "l2_predictor", l2_folder_name, l2_ckpt_name)
-# --- END: l2_predictor path info in save dir (safe to remove) ---
-
-
-def _get_l2_debug_branch_and_scale(model):
-    condition_preprocessor = getattr(model, "condition_preprocessor", None)
-    if condition_preprocessor is None:
-        return "sem", model.enc_scale_dino
-
-    get_branch = getattr(condition_preprocessor, "get_l2_predictor_encoder_branch", None)
-    get_scale = getattr(condition_preprocessor, "get_l2_predictor_latent_scale", None)
-    if callable(get_branch) and callable(get_scale):
-        return get_branch(), get_scale()
-
-    return "sem", model.enc_scale_dino
-
-
-@torch.no_grad()
-def reconstruct_frames_in_chunks(model, frames, output_device="cpu"):
-    """Reconstruct frames with bounded decode memory by processing one timestep at a time."""
-    reconstructed = []
-    for frame_idx in range(frames.shape[1]):
-        frame = frames[:, frame_idx : frame_idx + 1]
-        latent = model.encode_frames(frame)
-        try:
-            decoded = model.decode_frames(latent, output_device=output_device)
-        except TypeError:
-            decoded = model.decode_frames(latent)
-            if output_device is not None:
-                decoded = decoded.to(output_device)
-        reconstructed.append(decoded)
-    return torch.cat(reconstructed, dim=1)
-
-
-@torch.no_grad()
-def save_l2_debug_images(model, condition_history, frames_dir, sample_in_batch_idx, sample_idx):
-    if not condition_history:
-        return
-
-    device = next(model.parameters()).device
-    l2_branch, l2_scale = _get_l2_debug_branch_and_scale(model)
-    debug_root = os.path.join(frames_dir, "l2_debug", f"sequence_{sample_idx:04d}")
-    os.makedirs(debug_root, exist_ok=True)
-
-    for step_idx, condition_kwargs in enumerate(condition_history):
-        latent = condition_kwargs.get("z_l2_end")
-        if not torch.is_tensor(latent):
-            continue
-        decoded = _decode_selected_if_branch(
-            model.ae,
-            l2_branch,
-            latent[sample_in_batch_idx : sample_in_batch_idx + 1].to(device) / l2_scale,
-        )
-        _save_tensor_image(decoded[0], os.path.join(debug_root, f"step_{step_idx:04d}.jpg"))
-
-
-def _tensor_to_serializable(value):
-    if torch.is_tensor(value):
-        return value.detach().cpu().tolist()
-    if isinstance(value, dict):
-        return {key: _tensor_to_serializable(subvalue) for key, subvalue in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_tensor_to_serializable(item) for item in value]
-    return value
-
-
-def _save_2d_tensor_csv(tensor, csv_path, header_prefix):
-    """Save a [T, D] tensor as CSV."""
-    tensor = tensor.detach().cpu()
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(-1)
-    if tensor.ndim != 2:
-        raise ValueError(f"Expected a 2D tensor for debug dump, got shape {tuple(tensor.shape)}")
-
-    num_cols = tensor.shape[1]
-    header = [f"{header_prefix}_{col_idx}" for col_idx in range(num_cols)]
-    np.savetxt(
-        csv_path,
-        tensor.numpy(),
-        delimiter=",",
-        header=",".join(header),
-        comments="",
-    )
-
-
-def _maybe_save_displacement_trajectory(condition_kwargs, debug_root, sample_in_batch_idx, output_prefix):
-    """Persist the full anchor-aligned XY displacement trajectory when raw speed/yaw is available."""
-    if not isinstance(condition_kwargs, dict):
-        return None
-
-    raw_speed_yaw = condition_kwargs.get("_raw_speed_yaw")
-    anchor_odo_index = condition_kwargs.get("_anchor_odo_index")
-    odometry_dt = condition_kwargs.get("_odometry_dt")
-    if not (torch.is_tensor(raw_speed_yaw) and torch.is_tensor(anchor_odo_index) and torch.is_tensor(odometry_dt)):
-        return None
-    if raw_speed_yaw.shape[0] <= sample_in_batch_idx:
-        return None
-
-    raw_speed_yaw = raw_speed_yaw[sample_in_batch_idx].detach().cpu()
-    anchor_odo_index = int(anchor_odo_index[sample_in_batch_idx].item())
-    odometry_dt = odometry_dt[sample_in_batch_idx : sample_in_batch_idx + 1].detach().cpu().to(dtype=raw_speed_yaw.dtype)
-
-    if raw_speed_yaw.ndim != 2 or raw_speed_yaw.shape[1] < 2:
-        return None
-    if not (0 <= anchor_odo_index < raw_speed_yaw.shape[0]):
-        return None
-
-    centered_traj = get_trajectory_from_speeds_and_yaw_rates_batch(
-        speeds=raw_speed_yaw[anchor_odo_index:, 0].unsqueeze(0),
-        yaw_rates=raw_speed_yaw[anchor_odo_index:, 1].unsqueeze(0),
-        dt=odometry_dt,
-    )[0, :, :2]
-
-    _save_2d_tensor_csv(
-        centered_traj,
-        os.path.join(debug_root, f"{output_prefix}_displacement_trajectory.csv"),
-        header_prefix=f"{output_prefix}_xy",
-    )
-    return {
-        "shape": list(centered_traj.shape),
-        "anchor_odo_index": anchor_odo_index,
-        "trajectory_start_odo_index": anchor_odo_index,
-        "trajectory_end_odo_index": raw_speed_yaw.shape[0] - 1,
-    }
-
-
-def _save_rollout_condition_history_csv(condition_history, sample_in_batch_idx, csv_path, key_path, value_prefix):
-    """Save per-rollout-step conditioning tensors as a flat CSV with explicit step/point indices."""
-    if not condition_history:
-        return None
-
-    rows = []
-    value_dim = None
-    for rollout_step_idx, step_condition_kwargs in enumerate(condition_history):
-        value = step_condition_kwargs
-        for key in key_path:
-            if not isinstance(value, dict) or key not in value:
-                value = None
-                break
-            value = value[key]
-        if not torch.is_tensor(value) or value.shape[0] <= sample_in_batch_idx:
-            continue
-
-        value = value[sample_in_batch_idx].detach().cpu()
-        if value.ndim == 1:
-            value = value.unsqueeze(0)
-        if value.ndim != 2:
-            continue
-
-        if value_dim is None:
-            value_dim = value.shape[1]
-        elif value.shape[1] != value_dim:
-            raise ValueError(
-                f"Inconsistent conditioning width in history for {key_path}: "
-                f"{value.shape[1]} vs expected {value_dim}."
-            )
-
-        for point_idx, row in enumerate(value.tolist()):
-            rows.append([float(rollout_step_idx), float(point_idx), *row])
-
-    if not rows or value_dim is None:
-        return None
-
-    header = ["rollout_step", "condition_point_idx"] + [f"{value_prefix}_{dim_idx}" for dim_idx in range(value_dim)]
-    np.savetxt(
-        csv_path,
-        np.asarray(rows, dtype=np.float32),
-        delimiter=",",
-        header=",".join(header),
-        comments="",
-    )
-    return {
-        "num_rows": len(rows),
-        "value_dim": value_dim,
-        "num_rollout_steps": len(condition_history),
-    }
-
-
-def save_condition_debug_dump(data_batch, condition_kwargs, condition_history, frames_dir, sample_in_batch_idx, sample_idx):
-    """Persist raw and delegated steering state for one rollout sample."""
-    debug_root = os.path.join(frames_dir, "condition_debug", f"sequence_{sample_idx:04d}")
-    os.makedirs(debug_root, exist_ok=True)
-
-    payload = {}
-
-    if "frame_rate" in data_batch:
-        frame_rate = data_batch["frame_rate"]
-        if torch.is_tensor(frame_rate):
-            payload["frame_rate"] = _tensor_to_serializable(frame_rate[sample_in_batch_idx])
-        else:
-            payload["frame_rate"] = frame_rate
-
-    if "steering_format" in data_batch:
-        payload["steering_format"] = data_batch["steering_format"]
-
-    raw_steering = data_batch.get("steering")
-    if torch.is_tensor(raw_steering):
-        raw_steering = raw_steering[sample_in_batch_idx].detach().cpu()
-        _save_2d_tensor_csv(
-            raw_steering,
-            os.path.join(debug_root, "raw_steering.csv"),
-            header_prefix="raw",
-        )
-        payload["raw_steering_shape"] = list(raw_steering.shape)
-
-    if "l2_context" in data_batch and torch.is_tensor(data_batch["l2_context"]):
-        payload["l2_context_num_frames"] = int(data_batch["l2_context"][sample_in_batch_idx].shape[0])
-
-    if condition_history:
-        payload["condition_history"] = {}
-        top_level_history_metadata = _save_rollout_condition_history_csv(
-            condition_history=condition_history,
-            sample_in_batch_idx=sample_in_batch_idx,
-            csv_path=os.path.join(debug_root, "rollout_condition_history.csv"),
-            key_path=("steering",),
-            value_prefix="condition",
-        )
-        if top_level_history_metadata is not None:
-            payload["condition_history"]["top_level"] = top_level_history_metadata
-
-        delegated_l2_history_metadata = _save_rollout_condition_history_csv(
-            condition_history=condition_history,
-            sample_in_batch_idx=sample_in_batch_idx,
-            csv_path=os.path.join(debug_root, "delegated_l2_rollout_condition_history.csv"),
-            key_path=("_l2_condition_kwargs", "steering"),
-            value_prefix="delegated_l2_condition",
-        )
-        if delegated_l2_history_metadata is not None:
-            payload["condition_history"]["delegated_l2"] = delegated_l2_history_metadata
-
-    if condition_kwargs:
-        sample_payload = {}
-        for key in ("steering", "_anchor_odo_index", "_rollout_step_odo", "_odometry_dt"):
-            if key in condition_kwargs:
-                value = condition_kwargs[key]
-                if torch.is_tensor(value) and value.shape[0] > sample_in_batch_idx:
-                    sample_payload[key] = _tensor_to_serializable(value[sample_in_batch_idx])
-                else:
-                    sample_payload[key] = _tensor_to_serializable(value)
-        source_raw_speed_yaw = condition_kwargs.get("_source_raw_speed_yaw")
-        if torch.is_tensor(source_raw_speed_yaw):
-            source_raw_speed_yaw = source_raw_speed_yaw[sample_in_batch_idx].detach().cpu()
-            _save_2d_tensor_csv(
-                source_raw_speed_yaw,
-                os.path.join(debug_root, "source_raw_steering.csv"),
-                header_prefix="source_raw",
-            )
-            sample_payload["_source_raw_speed_yaw_shape"] = list(source_raw_speed_yaw.shape)
-        transformed_raw_speed_yaw = condition_kwargs.get("_raw_speed_yaw")
-        if torch.is_tensor(transformed_raw_speed_yaw):
-            transformed_raw_speed_yaw = transformed_raw_speed_yaw[sample_in_batch_idx].detach().cpu()
-            _save_2d_tensor_csv(
-                transformed_raw_speed_yaw,
-                os.path.join(debug_root, "transformed_raw_steering.csv"),
-                header_prefix="transformed_raw",
-            )
-            sample_payload["_raw_speed_yaw_shape"] = list(transformed_raw_speed_yaw.shape)
-        displacement_metadata = _maybe_save_displacement_trajectory(
-            condition_kwargs,
-            debug_root,
-            sample_in_batch_idx,
-            output_prefix="condition",
-        )
-        if displacement_metadata is not None:
-            sample_payload["displacement_trajectory"] = displacement_metadata
-
-        l2_condition_kwargs = condition_kwargs.get("_l2_condition_kwargs")
-        if l2_condition_kwargs:
-            l2_payload = {}
-            for key in ("steering", "_anchor_odo_index", "_rollout_step_odo", "_odometry_dt"):
-                if key not in l2_condition_kwargs:
-                    continue
-                value = l2_condition_kwargs[key]
-                if torch.is_tensor(value) and value.shape[0] > sample_in_batch_idx:
-                    l2_payload[key] = _tensor_to_serializable(value[sample_in_batch_idx])
-                else:
-                    l2_payload[key] = _tensor_to_serializable(value)
-            l2_displacement_metadata = _maybe_save_displacement_trajectory(
-                l2_condition_kwargs,
-                debug_root,
-                sample_in_batch_idx,
-                output_prefix="delegated_l2_condition",
-            )
-            if l2_displacement_metadata is not None:
-                l2_payload["displacement_trajectory"] = l2_displacement_metadata
-            sample_payload["delegated_l2_condition_kwargs"] = l2_payload
-
-            delegated_raw_speed_yaw = l2_condition_kwargs.get("_raw_speed_yaw")
-            if torch.is_tensor(delegated_raw_speed_yaw):
-                delegated_raw_speed_yaw = delegated_raw_speed_yaw[sample_in_batch_idx].detach().cpu()
-                _save_2d_tensor_csv(
-                    delegated_raw_speed_yaw,
-                    os.path.join(debug_root, "delegated_l2_raw_speed_yaw.csv"),
-                    header_prefix="delegated_l2_raw",
-                )
-                l2_payload["_raw_speed_yaw_shape"] = list(delegated_raw_speed_yaw.shape)
-
-            delegated_source_raw_speed_yaw = l2_condition_kwargs.get("_source_raw_speed_yaw")
-            if torch.is_tensor(delegated_source_raw_speed_yaw):
-                delegated_source_raw_speed_yaw = delegated_source_raw_speed_yaw[sample_in_batch_idx].detach().cpu()
-                _save_2d_tensor_csv(
-                    delegated_source_raw_speed_yaw,
-                    os.path.join(debug_root, "delegated_l2_source_raw_speed_yaw.csv"),
-                    header_prefix="delegated_l2_source_raw",
-                )
-                l2_payload["_source_raw_speed_yaw_shape"] = list(delegated_source_raw_speed_yaw.shape)
-
-        payload["condition_kwargs"] = sample_payload
-
-    with open(os.path.join(debug_root, "condition_debug.json"), "w") as f:
-        json.dump(payload, f, indent=2)
 
 
 def get_steering_source_string(steering_file, no_steering=False):
@@ -846,10 +514,8 @@ def generate_images(args, unknown_args):
         )
 
         autocast_enabled = args.device.startswith("cuda")
-        condition_history = None
-        capture_condition_history = args.save_l2_debug or args.save_condition_debug
         with torch.autocast(dtype=torch.float16, device_type="cuda", enabled=autocast_enabled):
-            rollout_result = model.roll_out(
+            _latents, gen_frames = model.roll_out(
                 x_0=rollout_context,
                 num_gen_frames=args.num_gen_frames,
                 latent_input=False,
@@ -860,14 +526,8 @@ def generate_images(args, unknown_args):
                 frame_rate=frame_rate,
                 condition_kwargs=condition_kwargs,
                 decode_device=args.decode_device,
-                return_condition_history=capture_condition_history,
                 num_condition_frames=cond_x.size(1),
             )
-            if capture_condition_history:
-                _latents, gen_frames, condition_history = rollout_result
-            else:
-                _latents, gen_frames = rollout_result
-            real_frames_enc_dec = None
 
         if args.vis_mode in {"trajectory", "trajectory_ego"}:
             overlay_trajectory = model.condition_preprocessor.get_rollout_visualization_trajectory(
@@ -882,7 +542,6 @@ def generate_images(args, unknown_args):
             if overlay_trajectory is not None:
                 gen_frames = overlay_trajectory_on_images(gen_frames, overlay_trajectory, mode=args.vis_mode)
 
-        condition_debug_kwargs = condition_kwargs
         # Release rollout-time latent state before CPU-side file I/O.
         del _latents, condition_kwargs, rollout_context, condition_batch, cond_x
 
@@ -909,28 +568,6 @@ def generate_images(args, unknown_args):
                 fps=args.frame_rate if frame_rate is not None else 7,
                 loop=0,
             )
-
-            if args.save_real:
-                subfolder_path_real = os.path.join(args.frames_dir, "real_images", f"sequence_{sample_idx:04d}")
-                if not os.path.exists(subfolder_path_real):
-                    os.makedirs(subfolder_path_real)
-                for f in range(x.shape[1]):
-                    save_image(
-                        (x[sample_in_batch_idx, f] + 1.0) / 2.0,
-                        os.path.join(subfolder_path_real, f"frame_{f:04d}.jpg"),
-                    )
-
-            if args.save_l2_debug:
-                save_l2_debug_images(model, condition_history, args.frames_dir, sample_in_batch_idx, sample_idx)
-            if args.save_condition_debug:
-                save_condition_debug_dump(
-                    data_batch,
-                    condition_debug_kwargs,
-                    condition_history,
-                    args.frames_dir,
-                    sample_in_batch_idx,
-                    sample_idx,
-                )
 
             sample_idx += 1
 
