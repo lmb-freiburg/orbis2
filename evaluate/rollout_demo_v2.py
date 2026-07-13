@@ -15,13 +15,40 @@ from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.utils import save_image
 
-from data.video_loaders import ClipAugmenter, PILFrameAdapter, ResizeCenterPolicy
+from data.l2_context import L2ContextMixin
+from data.video_loaders import ClipAugmenter, DecordFrameAdapter, ResizeCenterPolicy, TensorFrameAdapter
 from util import instantiate_from_config
+
+try:
+    from decord import VideoReader, cpu as decord_cpu
+    DECORD_AVAILABLE = True
+except ImportError:
+    DECORD_AVAILABLE = False
+
+try:
+    from torchcodec.decoders import VideoDecoder
+    TORCHCODEC_AVAILABLE = True
+except ImportError:
+    TORCHCODEC_AVAILABLE = False
 
 
 logger = logging.getLogger(__name__)
 
 STEERING_FORMAT = "speed_yawrate"
+
+
+class _L1L2FrameIndexer(L2ContextMixin):
+    """Computes L1/L2 frame indices into a single source video via `L2ContextMixin`."""
+
+    def __init__(self, frame_interval, stored_data_frame_rate, num_l2_context, l2_frame_rate, l1_context_frames):
+        self.frame_interval = frame_interval
+        self.stored_data_frame_rate = stored_data_frame_rate
+        self._init_l2_context(
+            num_l2_context=num_l2_context,
+            l2_frame_rate=l2_frame_rate,
+            l1_context_frames=l1_context_frames,
+            require_l2_context=True,
+        )
 
 
 def get_rollout_future_frame_count(model, num_gen_frames):
@@ -47,11 +74,112 @@ def resolve_context_image_size(args, config):
     return height, width
 
 
-def load_context_images(image_paths, height, width, device):
-    """Load and preprocess raw image files into a [1, F, C, H, W] tensor in [-1, 1]."""
-    frames = [Image.open(path).convert("RGB") for path in image_paths]
-    augmenter = ClipAugmenter(PILFrameAdapter(), ResizeCenterPolicy((height, width)))
-    return augmenter(frames).unsqueeze(0).to(device)
+def require_l1l2_model(model):
+    """Raise a clear error if the loaded model isn't an L1-L2 hierarchical model."""
+    condition_preprocessor = getattr(model, "condition_preprocessor", None)
+    if condition_preprocessor is None or not hasattr(condition_preprocessor, "num_context_frames") \
+            or not hasattr(condition_preprocessor, "l2_predictor_frame_rate"):
+        raise TypeError(
+            "This script requires an L1-L2 hierarchical model, i.e. a `condition_preprocessor` "
+            "with a frozen `l2_predictor` (num_context_frames/l2_predictor_frame_rate). "
+            f"Got {type(condition_preprocessor).__name__ if condition_preprocessor else None}."
+        )
+
+
+def resolve_video_backend():
+    """Pick decord as the primary video backend, falling back to the slower torchcodec if unavailable."""
+    if DECORD_AVAILABLE:
+        return "decord"
+    if TORCHCODEC_AVAILABLE:
+        return "torchcodec"
+    raise ImportError("Either `decord` or `torchcodec` must be installed to read video frames.")
+
+
+def get_video_fps_and_length(path, backend):
+    """Return (native_fps, num_frames) for a video file."""
+    if backend == "decord":
+        reader = VideoReader(path, ctx=decord_cpu(0))
+        return float(reader.get_avg_fps()), len(reader)
+    decoder = VideoDecoder(path)
+    return float(decoder.metadata.average_fps), int(decoder.metadata.num_frames)
+
+
+def decode_video_frames(path, indices, backend):
+    """Decode an arbitrary list of frame indices from a video file."""
+    if backend == "decord":
+        reader = VideoReader(path, ctx=decord_cpu(0))
+        return reader.get_batch(indices).asnumpy()
+    decoder = VideoDecoder(path)
+    return torch.stack([decoder[i] for i in indices])
+
+
+def compute_frame_interval(native_fps, target_frame_rate, label):
+    """Return the integer native-frame stride for `target_frame_rate`, or raise if not exact."""
+    ratio = native_fps / float(target_frame_rate)
+    rounded = round(ratio)
+    if abs(ratio - rounded) > 1e-6:
+        raise ValueError(
+            f"The video's native frame rate ({native_fps:g} Hz) must be an integer multiple of "
+            f"{label} ({target_frame_rate:g} Hz), got ratio={ratio:g}."
+        )
+    return int(rounded)
+
+
+def resolve_l2_frame_rate(args, model):
+    """Return the L2 sampling rate, defaulting to (and validating against) the frozen L2 predictor's own rate."""
+    model_rate = model.condition_preprocessor.l2_predictor_frame_rate
+    if args.l2_frame_rate is None:
+        return float(model_rate)
+    if abs(float(args.l2_frame_rate) - float(model_rate)) > 1e-6:
+        raise ValueError(
+            f"--l2_frame_rate={args.l2_frame_rate:g} does not match the frozen L2 predictor's "
+            f"trained frame rate ({model_rate:g}); the L2 image context must be sampled at the "
+            "rate the L2 predictor was trained on."
+        )
+    return float(args.l2_frame_rate)
+
+
+def load_l1_l2_context(video_path, start_frame, l1_frame_rate, l2_frame_rate, l1_context_frames, l2_context_frames, height, width, backend, device):
+    """Sample L1 (high-rate) and L2 (low-rate, further back) context windows from one video."""
+    native_fps, video_length = get_video_fps_and_length(video_path, backend)
+    frame_interval = compute_frame_interval(native_fps, l1_frame_rate, "--l1_frame_rate")
+    compute_frame_interval(native_fps, l2_frame_rate, "--l2_frame_rate")
+
+    indexer = _L1L2FrameIndexer(
+        frame_interval=frame_interval,
+        stored_data_frame_rate=native_fps,
+        num_l2_context=l2_context_frames,
+        l2_frame_rate=l2_frame_rate,
+        l1_context_frames=l1_context_frames,
+    )
+
+    l1_span = (l1_context_frames - 1) * frame_interval + 1
+    if start_frame is None:
+        start_frame = video_length - l1_span
+    if start_frame < 0 or start_frame + l1_span > video_length:
+        raise ValueError(
+            f"Video is too short for the requested L1 context: need frames [{start_frame}, "
+            f"{start_frame + l1_span - 1}], but the video only has {video_length} frames."
+        )
+
+    required_offset = indexer.get_required_l1_start_offset()
+    if start_frame < required_offset:
+        raise ValueError(
+            f"Video does not have enough lookback for L2 context: start_frame={start_frame} but "
+            f"at least {required_offset} frames of history are required before it. "
+            "Use a longer video, a later --start_frame, or a lower --l2_frame_rate."
+        )
+
+    l1_indices, l2_indices = indexer.get_l1_and_l2_indices(start_frame, l1_context_frames)
+    all_frames = decode_video_frames(video_path, l1_indices + l2_indices, backend)
+
+    adapter = DecordFrameAdapter() if backend == "decord" else TensorFrameAdapter()
+    augmenter = ClipAugmenter(adapter, ResizeCenterPolicy((height, width)))
+    all_tensor = augmenter(all_frames)  # [F, C, H, W] in [-1, 1]
+
+    l1_tensor = all_tensor[: len(l1_indices)].unsqueeze(0).to(device)
+    l2_tensor = all_tensor[len(l1_indices) :].unsqueeze(0).to(device)
+    return l1_tensor, l2_tensor
 
 
 def load_steering_trajectory(steering_file, min_odo_steps, dtype, device):
@@ -290,7 +418,7 @@ def overlay_trajectory_on_images(images, visualization, mode="trajectory"):
 
 @torch.no_grad()
 def generate_images(args, unknown_args):
-    """Run a v2 steering-conditioned rollout from raw context images and save the resulting frames."""
+    """Run an L1-L2 hierarchical rollout from a single input video and save the resulting frames."""
     if args.seed > 0:
         torch.backends.cudnn.enable = False
         torch.backends.cudnn.deterministic = True
@@ -306,6 +434,8 @@ def generate_images(args, unknown_args):
     assert _unexpected_missing_keys == [], _unexpected_missing_keys
     model = model.to(args.device)
     _ = model.eval()
+
+    require_l1l2_model(model)
 
     if os.path.exists(args.output_dir):
         print("Folder exists, new images will be saved to the same folder, delete it if you want to start from scratch")
@@ -341,12 +471,28 @@ def generate_images(args, unknown_args):
     maybe_apply_condition_preprocessor_scales(model, args.speed_scale, args.yaw_rate_scale)
 
     height, width = resolve_context_image_size(args, config)
-    num_condition_frames = len(args.images)
-    num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
+    backend = resolve_video_backend()
+    l2_frame_rate = resolve_l2_frame_rate(args, model)
 
-    cond_x = load_context_images(args.images, height, width, args.device)
-    frame_rate = torch.tensor(float(args.frame_rate), device=args.device)
-    data_batch = {"images": cond_x, "frame_rate": frame_rate}
+    l1_context_frames = int(model.vit.num_context_frames)
+    l2_context_frames = int(model.condition_preprocessor.num_context_frames)
+
+    l1_tensor, l2_tensor = load_l1_l2_context(
+        video_path=args.video,
+        start_frame=args.start_frame,
+        l1_frame_rate=args.l1_frame_rate,
+        l2_frame_rate=l2_frame_rate,
+        l1_context_frames=l1_context_frames,
+        l2_context_frames=l2_context_frames,
+        height=height,
+        width=width,
+        backend=backend,
+        device=args.device,
+    )
+
+    num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
+    frame_rate = torch.tensor(float(args.l1_frame_rate), device=args.device)
+    data_batch = {"images": l1_tensor, "l2_context": l2_tensor, "frame_rate": frame_rate}
 
     if args.steering_file is not None:
         get_required_steps = getattr(model.condition_preprocessor, "get_required_rollout_odometry_steps", None)
@@ -354,12 +500,12 @@ def generate_images(args, unknown_args):
         if callable(get_required_steps):
             min_odo_steps = get_required_steps(
                 validation_params=None,
-                num_condition_frames=num_condition_frames,
+                num_condition_frames=l1_context_frames,
                 num_gen_frames=num_future_frames,
                 rollout_steps=args.num_gen_frames,
             )
         data_batch["steering"] = load_steering_trajectory(
-            args.steering_file, min_odo_steps, dtype=cond_x.dtype, device=args.device
+            args.steering_file, min_odo_steps, dtype=l1_tensor.dtype, device=args.device
         )
         data_batch["steering_format"] = STEERING_FORMAT
 
@@ -367,28 +513,29 @@ def generate_images(args, unknown_args):
 
     logger.info(f"Steering source: {'none' if args.steering_file is None else args.steering_file}")
     logger.info(f"Steering scales: speed={args.speed_scale:g}, yaw_rate={args.yaw_rate_scale:g}")
+    logger.info(f"L1/L2 frame rates: {args.l1_frame_rate:g}/{l2_frame_rate:g} Hz")
     logger.info(f"Saving generated images to {args.output_dir}")
 
     autocast_enabled = args.device.startswith("cuda")
     with torch.autocast(dtype=torch.float16, device_type="cuda", enabled=autocast_enabled):
         _latents, gen_frames = model.roll_out(
-            x_0={"images": cond_x},
+            x_0={"images": l1_tensor},
             num_gen_frames=args.num_gen_frames,
             latent_input=False,
             NFE=args.num_steps,
             eta=args.eta,
             sample_with_ema=args.evaluate_ema,
-            num_samples=cond_x.size(0),
+            num_samples=l1_tensor.size(0),
             frame_rate=frame_rate,
             condition_kwargs=condition_kwargs,
             decode_device=args.decode_device,
-            num_condition_frames=cond_x.size(1),
+            num_condition_frames=l1_tensor.size(1),
         )
 
     if args.vis_mode in {"trajectory", "trajectory_ego"}:
         overlay_trajectory = model.condition_preprocessor.get_rollout_visualization_trajectory(
             condition_kwargs=model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout"),
-            num_condition_frames=num_condition_frames,
+            num_condition_frames=l1_context_frames,
             num_gen_steps=args.num_gen_frames,
             num_pred_frames=model.num_pred_frames,
         )
@@ -396,7 +543,7 @@ def generate_images(args, unknown_args):
             gen_frames = overlay_trajectory_on_images(gen_frames, overlay_trajectory, mode=args.vis_mode)
 
     # Release rollout-time latent state before CPU-side file I/O.
-    del _latents, condition_kwargs, cond_x
+    del _latents, condition_kwargs, l1_tensor, l2_tensor
 
     frames_dir = os.path.join(args.output_dir, "frames")
     os.makedirs(frames_dir, exist_ok=True)
@@ -412,7 +559,7 @@ def generate_images(args, unknown_args):
             np.array(Image.open(os.path.join(frames_dir, f"frame_{f:04d}.jpg")))
             for f in range(gen_frames.shape[1])
         ],
-        fps=args.frame_rate,
+        fps=args.l1_frame_rate,
         loop=0,
     )
 
@@ -448,13 +595,10 @@ if __name__ == "__main__":
     parser.add_argument("--exp_dir", type=str, default=None, help="Path to the experiment directory, where the config and checkpoints are stored")
     parser.add_argument("--ckpt", type=str, default="checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the config file, relative to exp_dir")
-    parser.add_argument(
-        "--images",
-        type=str,
-        nargs="+",
-        required=True,
-        help="Paths to the context image files, in temporal order (oldest first).",
-    )
+    parser.add_argument("--video", type=str, required=True, help="Path to the input video file to sample L1/L2 context from.")
+    parser.add_argument("--l1_frame_rate", type=float, required=True, help="Frame rate (Hz) to sample L1 context/rollout frames at, and the generated GIF's fps.")
+    parser.add_argument("--l2_frame_rate", type=float, default=None, help="Frame rate (Hz) to sample L2 context frames at. Defaults to the frozen L2 predictor's own trained frame rate; must match it if given explicitly.")
+    parser.add_argument("--start_frame", type=int, default=None, help="Native-video frame index to start the L1 context window at. Defaults to the latest window that fits (the end of the video).")
     parser.add_argument("--height", type=int, default=None, help="Height to resize context images to. Defaults to the training config's size.")
     parser.add_argument("--width", type=int, default=None, help="Width to resize context images to. Defaults to the training config's size.")
     parser.add_argument(
@@ -471,10 +615,9 @@ if __name__ == "__main__":
         choices=["none", "trajectory", "trajectory_ego"],
         help="Visualization mode",
     )
-    parser.add_argument("--steering_file", type=str, default=None, help="Optional .npy or .csv trajectory file (columns: speed, yaw_rate) used as steering input. If omitted, the rollout is unconditional.")
+    parser.add_argument("--steering_file", type=str, default=None, help="Optional .npy or .csv trajectory file (columns: speed, yaw_rate), already at the expected odometry rate, used as steering input.")
     parser.add_argument("--speed_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw speed conditioning")
     parser.add_argument("--yaw_rate_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw yaw-rate conditioning")
-    parser.add_argument("--frame_rate", type=float, default=7, help="Frame rate (Hz) of the input context images, used for steering alignment and as the generated GIF's fps.")
 
     parser.add_argument("--seed", type=int, default=42, help="Seed for reproducibility")
     parser.add_argument("--device", type=str, default="cuda", help="Device")
