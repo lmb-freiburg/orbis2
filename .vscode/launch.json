@@ -22,10 +22,11 @@
 
                 "--output_dir=scratch/rollout",
                 "--num_steps=5",
-                "--num_gen_frames=20",
+                "--num_gen_frames=7",
                 // "--compile=True",
 
-                "--spline_points=0,0;10,2;20,2;30,-3",
+
+                "--trajectory_file=example_trajectory.csv",
                 "--vis_mode=trajectory_ego",
             ],
             "env": {
