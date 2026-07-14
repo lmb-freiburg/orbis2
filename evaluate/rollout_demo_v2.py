@@ -13,7 +13,6 @@ from omegaconf import OmegaConf
 from omegaconf.errors import ConfigTypeError
 from PIL import Image
 from pytorch_lightning import seed_everything
-from scipy.interpolate import CubicSpline
 from torchvision.utils import save_image
 
 from data.l2_context import L2ContextMixin
@@ -207,54 +206,51 @@ def load_steering_trajectory(steering_file, min_odo_steps, dtype, device):
     return torch.as_tensor(loaded, dtype=dtype, device=device).unsqueeze(0)
 
 
-def parse_spline_points(spline_points_str):
-    """Parse 'x1,y1;x2,y2;...' into an [N, 2] float array (forward, lateral meters)."""
-    try:
-        points = np.array(
-            [[float(v) for v in pair.split(",")] for pair in spline_points_str.split(";")],
-            dtype=np.float64,
-        )
-    except ValueError as e:
+def load_trajectory_points(trajectory_file, min_odo_steps):
+    """Load a raw [x, y] trajectory (forward, lateral meters), already at the expected
+    odometry rate, from a .npy/.csv file, as a [T, 2] numpy array."""
+    if not os.path.isfile(trajectory_file):
+        raise FileNotFoundError(f"Trajectory file {trajectory_file} does not exist")
+
+    if trajectory_file.endswith(".npy"):
+        loaded = np.load(trajectory_file)
+    elif trajectory_file.endswith(".csv"):
+        loaded = np.loadtxt(trajectory_file, delimiter=",")
+    else:
+        raise ValueError("Trajectory file must end with .npy or .csv")
+
+    if loaded.ndim != 2 or loaded.shape[1] != 2:
         raise ValueError(
-            f"--spline_points must be formatted as 'x1,y1;x2,y2;...', got {spline_points_str!r}"
-        ) from e
-    if points.ndim != 2 or points.shape[1] != 2:
-        raise ValueError(
-            f"--spline_points must be formatted as 'x1,y1;x2,y2;...', got {spline_points_str!r}"
+            f"Trajectory file must contain [T, 2] (x, y) rows, got shape {tuple(loaded.shape)}"
         )
-    if points.shape[0] < 2:
-        raise ValueError(f"--spline_points must contain at least 2 waypoints, got {points.shape[0]}")
-    return points
+    # One fewer usable (speed, yaw_rate) step than trajectory points, since both are
+    # derived from consecutive-point differences; require enough points to cover that.
+    if min_odo_steps is not None and loaded.shape[0] < min_odo_steps + 1:
+        raise ValueError(
+            f"Trajectory file has too few timesteps: got {loaded.shape[0]}, expected at least {min_odo_steps + 1}"
+        )
+
+    return loaded
 
 
-def build_steering_from_spline(spline_points_str, min_odo_steps, anchor_odo_index, dt, dtype, device):
-    """Fit a natural cubic spline through inline waypoints and sample it into a
-    [1, min_odo_steps, 2] (speed, yaw_rate) tensor, spacing the waypoints evenly across
-    the post-anchor rollout horizon. Indices before `anchor_odo_index` are never read by
-    the condition preprocessor, so they are left zero-filled.
+def trajectory_to_speed_yawrate(traj_xy, dt):
+    """Differentiate an [T, 2] (x, y) trajectory (forward, lateral meters) into a
+    [T - 1, 2] (speed, yaw_rate) array at the same odometry rate, matching the convention
+    of `data.utils.get_trajectory_from_speeds_and_yaw_rates_batch`: `speed[i]` is the
+    magnitude of segment i (point i -> point i+1), and `yaw_rate[i]` is the turn applied
+    *after* segment i so that segment i+1 points in the right direction (yaw_rate[i] only
+    affects `headings_for_translation[i+1]` onward, never segment i itself). The absolute
+    orientation of the input file's coordinate frame does not matter: reconstruction always
+    treats segment 0's direction as the local +x axis, exactly like `get_trajectory_from_speeds_and_yaw_rates`.
     """
-    points = parse_spline_points(spline_points_str)
-    tail_len = int(min_odo_steps) - int(anchor_odo_index)
-    if tail_len < 2:
-        raise ValueError(
-            f"Not enough rollout horizon to fit a spline: tail_len={tail_len} "
-            f"(min_odo_steps={min_odo_steps}, anchor_odo_index={anchor_odo_index}), need >= 2."
-        )
+    deltas = np.diff(traj_xy, axis=0)  # [T - 1, 2]
+    speed = np.hypot(deltas[:, 0], deltas[:, 1]) / dt
+    heading = np.unwrap(np.arctan2(deltas[:, 1], deltas[:, 0]))  # [T - 1]
 
-    waypoint_times = np.linspace(0.0, (tail_len - 1) * dt, points.shape[0])
-    spline_x = CubicSpline(waypoint_times, points[:, 0], bc_type="natural")
-    spline_y = CubicSpline(waypoint_times, points[:, 1], bc_type="natural")
+    yaw_rate = np.zeros_like(heading)
+    yaw_rate[:-1] = np.diff(heading) / dt  # yaw_rate[-1] left at 0: no further segment to define it
 
-    sample_times = np.arange(tail_len) * dt
-    dx, dy = spline_x(sample_times, 1), spline_y(sample_times, 1)
-    ddx, ddy = spline_x(sample_times, 2), spline_y(sample_times, 2)
-
-    speed = np.hypot(dx, dy)
-    yaw_rate = (dx * ddy - dy * ddx) / (dx**2 + dy**2 + 1e-8)  # curvature * speed
-
-    full = np.zeros((int(min_odo_steps), 2), dtype=np.float32)
-    full[int(anchor_odo_index):] = np.stack([speed, yaw_rate], axis=1)
-    return torch.as_tensor(full, dtype=dtype, device=device).unsqueeze(0)
+    return np.stack([speed, yaw_rate], axis=1).astype(np.float32)
 
 
 def make_unconditional_steering(min_odo_steps, dtype, device):
@@ -557,8 +553,8 @@ def generate_images(args, unknown_args):
     frame_rate = torch.tensor(float(args.l1_frame_rate), device=args.device)
     data_batch = {"images": l1_tensor, "l2_context": l2_tensor, "frame_rate": frame_rate}
 
-    if args.steering_file is not None and args.spline_points is not None:
-        raise ValueError("--steering_file and --spline_points are mutually exclusive.")
+    if args.steering_file is not None and args.trajectory_file is not None:
+        raise ValueError("--steering_file and --trajectory_file are mutually exclusive.")
 
     get_required_steps = getattr(model.condition_preprocessor, "get_required_rollout_odometry_steps", None)
     min_odo_steps = None
@@ -573,16 +569,14 @@ def generate_images(args, unknown_args):
         data_batch["steering"] = load_steering_trajectory(
             args.steering_file, min_odo_steps, dtype=l1_tensor.dtype, device=args.device
         )
-    elif args.spline_points is not None:
+    elif args.trajectory_file is not None:
         odometry_steps_per_image_frame = getattr(model.condition_preprocessor, "odometry_steps_per_image_frame", 1)
-        anchor_frame_index = getattr(model.condition_preprocessor, "context_frame_anchor_index", -1)
-        if anchor_frame_index < 0:
-            anchor_frame_index += l1_context_frames
-        anchor_odo_index = anchor_frame_index * odometry_steps_per_image_frame
         dt = 1.0 / (args.l1_frame_rate * odometry_steps_per_image_frame)
-        data_batch["steering"] = build_steering_from_spline(
-            args.spline_points, min_odo_steps, anchor_odo_index, dt, dtype=l1_tensor.dtype, device=args.device
-        )
+        traj_xy = load_trajectory_points(args.trajectory_file, min_odo_steps)
+        speed_yawrate = trajectory_to_speed_yawrate(traj_xy, dt)
+        data_batch["steering"] = torch.as_tensor(
+            speed_yawrate, dtype=l1_tensor.dtype, device=args.device
+        ).unsqueeze(0)
     else:
         data_batch["steering"] = make_unconditional_steering(min_odo_steps, dtype=l1_tensor.dtype, device=args.device)
     data_batch["steering_format"] = STEERING_FORMAT
@@ -591,8 +585,8 @@ def generate_images(args, unknown_args):
 
     if args.steering_file is not None:
         steering_source = args.steering_file
-    elif args.spline_points is not None:
-        steering_source = f"spline({args.spline_points})"
+    elif args.trajectory_file is not None:
+        steering_source = f"trajectory({args.trajectory_file})"
     else:
         steering_source = "none"
     logger.info(f"Steering source: {steering_source}")
@@ -701,12 +695,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--steering_file", type=str, default=None, help="Optional .npy or .csv trajectory file (columns: speed, yaw_rate), already at the expected odometry rate, used as steering input.")
     parser.add_argument(
-        "--spline_points",
+        "--trajectory_file",
         type=str,
         default=None,
-        help="Inline waypoints 'x1,y1;x2,y2;...' (forward,lateral meters, local ego frame) defining a path "
-             "via a natural cubic spline; converted to speed/yaw_rate and spread evenly across the rollout "
-             "duration. Mutually exclusive with --steering_file.",
+        help="Optional .npy or .csv file of raw [x, y] trajectory points (forward, lateral meters, "
+             "local ego frame), already at the expected odometry rate; converted to speed/yaw_rate via "
+             "finite differences and used as steering input. Mutually exclusive with --steering_file.",
     )
     parser.add_argument("--speed_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw speed conditioning")
     parser.add_argument("--yaw_rate_scale", type=float, default=1.0, help="Global multiplicative factor applied to raw yaw-rate conditioning")
