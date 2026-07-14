@@ -21,8 +21,9 @@
                 // "--start_frame=70",
 
                 "--output_dir=scratch/rollout",
-                "--num_steps=30",
-                "--num_gen_frames=20",
+                "--num_steps=5",
+                "--num_gen_frames=50",
+                "--compile=True",
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "1",

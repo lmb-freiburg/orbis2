@@ -362,22 +362,35 @@ class FlowMatchingObjectiveTeacherForcing(FlowMatchingObjective):
         return model_input, model_t, supervision_target, prediction_slice
 
 
-class FlowMatchingObjectiveDiffusionForcing(FlowMatchingObjective):
-    def sample_t(self, x):
-        return torch.rand(x.shape[0], x.shape[1], device=x.device)
+class FlowMatchingSamplerEuler:
+    """
+    Inference sampler used for all v2 models.
 
-    def prepare_training_inputs(self, x):
-        t = self.sample_t(x)
-        x_t, noise = self.add_noise(x, t)
-        supervision_target = self.get_supervision_target(x, noise, t)
-        return x_t, t, supervision_target, None
+    The context frames are kept clean in `model_input`; only the target frame
+    block is initialized with noise and integrated during sampling via an
+    Euler-Maruyama ODE/SDE solve.
+    """
 
-
-class FlowMatchingSampler:
-    def __init__(self, predictor_module, timescale=1.0, integration_t_eps=0.0):
+    def __init__(
+        self,
+        predictor_module,
+        timescale=1.0,
+        integration_t_eps=0.0,
+        timestep_conditioning="global",
+    ):
         self.module = predictor_module
         self.timescale = timescale
         self.integration_t_eps = float(integration_t_eps)
+        self.timestep_conditioning = self._normalize_timestep_conditioning(timestep_conditioning)
+
+    def _normalize_timestep_conditioning(self, timestep_conditioning):
+        mode = str(timestep_conditioning).strip().lower()
+        if mode not in {"global", "per_frame"}:
+            raise ValueError(
+                "timestep_conditioning must be one of {'global', 'per_frame'}, "
+                f"got {timestep_conditioning!r}."
+            )
+        return mode
 
     def _get_net(self, sample_with_ema):
         return self.module.ema_vit if sample_with_ema else self.module.vit
@@ -405,16 +418,46 @@ class FlowMatchingSampler:
         return model_input
 
     def _build_model_t(self, context, target_t, t_scalar):
-        del context, target_t, t_scalar
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement `_build_model_t`."
+        if self.timestep_conditioning == "global":
+            return t_scalar
+
+        target_t_full = t_scalar.unsqueeze(1).expand(-1, target_t.size(1))
+        if context is None or context.size(1) == 0:
+            return target_t_full
+        context_t = torch.zeros(
+            t_scalar.size(0),
+            context.size(1),
+            device=t_scalar.device,
+            dtype=t_scalar.dtype,
         )
+        return torch.cat([context_t, target_t_full], dim=1)
 
     def _extract_target_prediction(self, pred):
         return pred[:, -self.module.num_pred_frames :]
 
-    def _prepare_sampling_state(
-        self, images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
+    def _snapshot_condition_kwargs(self, condition_kwargs):
+        if not condition_kwargs:
+            return {}
+        snapshot = {}
+        for key, value in condition_kwargs.items():
+            if torch.is_tensor(value):
+                snapshot[key] = value.detach().cpu().clone()
+            else:
+                snapshot[key] = value
+        return snapshot
+
+    @torch.no_grad()
+    def sample(
+        self,
+        images=None,
+        latent=False,
+        eta=0.0,
+        NFE=20,
+        sample_with_ema=True,
+        num_samples=8,
+        frame_rate=None,
+        condition_kwargs=None,
+        return_sample=False,
     ):
         net = self._get_net(sample_with_ema)
         device = next(net.parameters()).device
@@ -441,74 +484,28 @@ class FlowMatchingSampler:
             input_w,
             device=device,
         )
-        return net, device, context, model_condition_kwargs, frame_rate, target_t
 
-    def _build_t_steps(self, NFE, device):
         if not 0.0 <= self.integration_t_eps < 0.5:
             raise ValueError(
                 "integration_t_eps must be in [0, 0.5), "
                 f"got {self.integration_t_eps}."
             )
-        return torch.linspace(
+        t_steps = torch.linspace(
             1.0 - self.integration_t_eps,
             self.integration_t_eps,
             NFE + 1,
             device=device,
         )
-
-    def _eval_velocity(self, net, context, target_t, t_scalar, frame_rate, model_condition_kwargs):
-        model_input = self._build_model_inputs(context, target_t, t_scalar)
-        model_t = self._build_model_t(context, target_t, t_scalar)
-        pred = net(model_input, t=model_t * self.timescale, frame_rate=frame_rate, **model_condition_kwargs)
-        return self._extract_target_prediction(pred)
-
-    def _euler_maruyama_step(self, target_t, neg_v, t_i, t_ip1, eta):
-        dt = t_i - t_ip1
-        dw = torch.randn(target_t.size(), device=target_t.device) * torch.sqrt(dt)
-        diffusion = dt
-        return target_t + neg_v * dt + eta * torch.sqrt(2 * diffusion) * dw
-
-    def _heun_step(self, net, context, target_t, t_i, t_ip1, frame_rate, model_condition_kwargs):
-        t_i_scalar = t_i.repeat(target_t.shape[0])
-        t_ip1_scalar = t_ip1.repeat(target_t.shape[0])
-        dt = t_i - t_ip1
-        v1 = self._eval_velocity(net, context, target_t, t_i_scalar, frame_rate, model_condition_kwargs)
-        x_pred = target_t + v1 * dt
-        v2 = self._eval_velocity(net, context, x_pred, t_ip1_scalar, frame_rate, model_condition_kwargs)
-        return target_t + 0.5 * (v1 + v2) * dt
-
-    def _snapshot_condition_kwargs(self, condition_kwargs):
-        if not condition_kwargs:
-            return {}
-        snapshot = {}
-        for key, value in condition_kwargs.items():
-            if torch.is_tensor(value):
-                snapshot[key] = value.detach().cpu().clone()
-            else:
-                snapshot[key] = value
-        return snapshot
-
-    @torch.no_grad()
-    def sample(
-        self,
-        images=None,
-        latent=False,
-        eta=0.0,
-        NFE=20,
-        sample_with_ema=True,
-        num_samples=8,
-        frame_rate=None,
-        condition_kwargs=None,
-        return_sample=False,
-    ):
-        net, device, context, model_condition_kwargs, frame_rate, target_t = self._prepare_sampling_state(
-            images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
-        )
-        t_steps = self._build_t_steps(NFE, device)
         for i in range(NFE):
             t_scalar = t_steps[i].repeat(target_t.shape[0])
-            neg_v = self._eval_velocity(net, context, target_t, t_scalar, frame_rate, model_condition_kwargs)
-            target_t = self._euler_maruyama_step(target_t, neg_v, t_steps[i], t_steps[i + 1], eta)
+            model_input = self._build_model_inputs(context, target_t, t_scalar)
+            model_t = self._build_model_t(context, target_t, t_scalar)
+            pred = net(model_input, t=model_t * self.timescale, frame_rate=frame_rate, **model_condition_kwargs)
+            neg_v = self._extract_target_prediction(pred)
+            dt = t_steps[i] - t_steps[i + 1]
+            dw = torch.randn(target_t.size(), device=target_t.device) * torch.sqrt(dt)
+            diffusion = dt
+            target_t = target_t + neg_v * dt + eta * torch.sqrt(2 * diffusion) * dw
 
         if return_sample:
             return target_t, self.module.decode_frames(target_t.clone())
@@ -572,177 +569,6 @@ class FlowMatchingSampler:
         if return_condition_history:
             return result + (condition_history,)
         return result
-
-
-class FlowMatchingSamplerTeacherForcing(FlowMatchingSampler):
-    """
-    Inference sampler used for all v2 models.
-
-    The context frames are kept clean in `model_input`; only the target frame
-    block is initialized with noise and integrated during sampling.
-    """
-
-    def __init__(
-        self,
-        predictor_module,
-        timescale=1.0,
-        integration_t_eps=0.0,
-        timestep_conditioning="global",
-    ):
-        super().__init__(
-            predictor_module,
-            timescale=timescale,
-            integration_t_eps=integration_t_eps,
-        )
-        self.timestep_conditioning = self._normalize_timestep_conditioning(timestep_conditioning)
-
-    def _normalize_timestep_conditioning(self, timestep_conditioning):
-        mode = str(timestep_conditioning).strip().lower()
-        if mode not in {"global", "per_frame"}:
-            raise ValueError(
-                "timestep_conditioning must be one of {'global', 'per_frame'}, "
-                f"got {timestep_conditioning!r}."
-            )
-        return mode
-
-    def _build_model_t(self, context, target_t, t_scalar):
-        if self.timestep_conditioning == "global":
-            return t_scalar
-
-        target_t_full = t_scalar.unsqueeze(1).expand(-1, target_t.size(1))
-        if context is None or context.size(1) == 0:
-            return target_t_full
-        context_t = torch.zeros(
-            t_scalar.size(0),
-            context.size(1),
-            device=t_scalar.device,
-            dtype=t_scalar.dtype,
-        )
-        return torch.cat([context_t, target_t_full], dim=1)
-
-    def _validate_num_heun_steps(self, num_heun_steps, NFE, eta):
-        if isinstance(num_heun_steps, bool) or not isinstance(num_heun_steps, int):
-            raise TypeError(
-                f"num_heun_steps must be an int, got {type(num_heun_steps).__name__}."
-            )
-        if not 0 <= num_heun_steps <= NFE:
-            raise ValueError(
-                f"num_heun_steps must be in [0, NFE] (NFE={NFE}), got {num_heun_steps}."
-            )
-        if num_heun_steps > 0 and eta != 0.0:
-            raise ValueError(
-                "Heun sampling (num_heun_steps > 0) is deterministic-only and cannot "
-                f"be combined with the stochastic SDE term; got eta={eta}. "
-                "Set eta=0.0 when num_heun_steps > 0."
-            )
-
-    @torch.no_grad()
-    def sample(
-        self,
-        images=None,
-        latent=False,
-        eta=0.0,
-        NFE=20,
-        sample_with_ema=True,
-        num_samples=8,
-        frame_rate=None,
-        condition_kwargs=None,
-        return_sample=False,
-        num_heun_steps=0,
-    ):
-        self._validate_num_heun_steps(num_heun_steps, NFE, eta)
-        net, device, context, model_condition_kwargs, frame_rate, target_t = self._prepare_sampling_state(
-            images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
-        )
-        t_steps = self._build_t_steps(NFE, device)
-        for i in range(NFE):
-            if i < num_heun_steps:
-                target_t = self._heun_step(
-                    net, context, target_t, t_steps[i], t_steps[i + 1], frame_rate, model_condition_kwargs
-                )
-            else:
-                t_scalar = t_steps[i].repeat(target_t.shape[0])
-                neg_v = self._eval_velocity(net, context, target_t, t_scalar, frame_rate, model_condition_kwargs)
-                target_t = self._euler_maruyama_step(target_t, neg_v, t_steps[i], t_steps[i + 1], eta)
-
-        if return_sample:
-            return target_t, self.module.decode_frames(target_t.clone())
-        return target_t
-
-    @torch.no_grad()
-    def roll_out(
-        self,
-        x_0,
-        num_gen_frames=25,
-        latent_input=True,
-        eta=0.0,
-        NFE=20,
-        sample_with_ema=True,
-        num_samples=8,
-        frame_rate=None,
-        condition_kwargs=None,
-        decode_device=None,
-        return_condition_history=False,
-        num_heun_steps=0,
-    ):
-        # num_heun_steps validation happens inside self.sample() on the first
-        # generated block, before any expensive work in this loop.
-        context = x_0.clone() if latent_input else self.module.encode_frames(x_0)
-        all_latents = context.clone()
-        condition_kwargs = self.module.condition_preprocessor.prepare_condition_kwargs(
-            condition_kwargs,
-            batch_size=context.size(0),
-            device=context.device,
-            split="rollout",
-        )
-        condition_history = []
-
-        for _idx in tqdm(range(num_gen_frames)):
-            if return_condition_history:
-                condition_history.append(self._snapshot_condition_kwargs(condition_kwargs))
-            prediction = self.sample(
-                images=context,
-                latent=True,
-                eta=eta,
-                NFE=NFE,
-                sample_with_ema=sample_with_ema,
-                num_samples=num_samples,
-                frame_rate=frame_rate,
-                condition_kwargs=condition_kwargs,
-                num_heun_steps=num_heun_steps,
-            )
-            all_latents = torch.cat([all_latents, prediction[:, -self.module.num_pred_frames :]], dim=1)
-            if _idx < num_gen_frames - 1:
-                condition_kwargs = self.module.condition_preprocessor.update_rollout_condition_kwargs(
-                    condition_kwargs,
-                    prediction=prediction,
-                    context=context,
-                    step_idx=_idx,
-                )
-            context = self._update_rollout_context(context, prediction)
-
-        result = (all_latents, self.module.decode_frames(all_latents, output_device=decode_device))
-        if return_condition_history:
-            return result + (condition_history,)
-        return result
-
-
-class FlowMatchingSamplerDiffusionForcing(FlowMatchingSampler):
-    """
-    Deprecated: diffusion forcing is a training objective, not a separate
-    inference scheme in v2. Use FlowMatchingSamplerTeacherForcing for clean
-    context / noisy target sampling.
-    """
-
-    def __init__(self, *args, **kwargs):
-        raise RuntimeError(
-            "FlowMatchingSamplerDiffusionForcing is deprecated. "
-            "Use FlowMatchingSamplerTeacherForcing for inference."
-        )
-
-    def _build_model_t(self, context, target_t, t_scalar):
-        del context
-        return t_scalar.unsqueeze(1).expand(-1, target_t.size(1))
 
 
 class PredictorModule(pl.LightningModule):
@@ -847,7 +673,7 @@ class PredictorModule(pl.LightningModule):
     def build_sampler(self, sampler_config):
         return self._build_helper_from_config(
             sampler_config,
-            "models.second_stage.fm_model_v2.FlowMatchingSamplerTeacherForcing",
+            "models.second_stage.fm_model_v2.FlowMatchingSamplerEuler",
         )
 
     def build_condition_preprocessor(self, condition_preprocessor_config):
@@ -1147,7 +973,7 @@ class PredictorModule(pl.LightningModule):
     ):
         if sample_with_ema:
             self._sync_ema_stream()
-
+            
         return self.sampler.sample(
             images=images,
             latent=latent,

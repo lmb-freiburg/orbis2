@@ -5,7 +5,7 @@ import torch
 
 from .fm_model_v2 import (
     FlowMatchingObjective,
-    FlowMatchingSamplerTeacherForcing,
+    FlowMatchingSamplerEuler,
     PredictorModule,
     requires_grad,
     update_ema,
@@ -108,7 +108,7 @@ class ConsistencyDistillationObjective(FlowMatchingObjective):
         return self.compute_loss(pred, tgt)
 
 
-class ConsistencyDistillationSampler(FlowMatchingSamplerTeacherForcing):
+class ConsistencyDistillationSampler(FlowMatchingSamplerEuler):
     """
     Few-step consistency sampler: repeatedly renoises the current endpoint
     estimate and re-predicts, over a short descending grid of timesteps,
