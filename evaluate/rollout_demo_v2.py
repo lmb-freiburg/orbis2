@@ -206,9 +206,10 @@ def load_steering_trajectory(steering_file, min_odo_steps, dtype, device):
     return torch.as_tensor(loaded, dtype=dtype, device=device).unsqueeze(0)
 
 
-def load_trajectory_points(trajectory_file, min_odo_steps):
-    """Load a raw [x, y] trajectory (forward, lateral meters), already at the expected
-    odometry rate, from a .npy/.csv file, as a [T, 2] numpy array."""
+def load_trajectory_points(trajectory_file):
+    """Load a raw [x, y] trajectory (forward, lateral meters) from a .npy/.csv file, as
+    a [T, 2] numpy array. T need not match any particular rate: the caller resamples
+    (by arc length) to however many odometry steps the current rollout needs."""
     if not os.path.isfile(trajectory_file):
         raise FileNotFoundError(f"Trajectory file {trajectory_file} does not exist")
 
@@ -223,14 +224,31 @@ def load_trajectory_points(trajectory_file, min_odo_steps):
         raise ValueError(
             f"Trajectory file must contain [T, 2] (x, y) rows, got shape {tuple(loaded.shape)}"
         )
-    # One fewer usable (speed, yaw_rate) step than trajectory points, since both are
-    # derived from consecutive-point differences; require enough points to cover that.
-    if min_odo_steps is not None and loaded.shape[0] < min_odo_steps + 1:
-        raise ValueError(
-            f"Trajectory file has too few timesteps: got {loaded.shape[0]}, expected at least {min_odo_steps + 1}"
-        )
+    if loaded.shape[0] < 2:
+        raise ValueError(f"Trajectory file must contain at least 2 points, got {loaded.shape[0]}")
 
     return loaded
+
+
+def resample_trajectory_by_arclength(points, n_samples):
+    """Resample a [T, 2] path to `n_samples` points evenly spaced by arc length,
+    preserving its shape while changing its temporal resolution to match however many
+    odometry steps the current rollout configuration needs -- so the whole drawn/provided
+    path is spread across the whole requested rollout duration, rather than being
+    truncated (too many input points) or rejected outright (too few)."""
+    pts = np.asarray(points, dtype=float)
+    deltas = np.diff(pts, axis=0)
+    seg_lengths = np.hypot(deltas[:, 0], deltas[:, 1])
+    cum_len = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_len = cum_len[-1]
+
+    if total_len == 0:
+        return np.repeat(pts[:1], n_samples, axis=0)
+
+    targets = np.linspace(0, total_len, n_samples)
+    x = np.interp(targets, cum_len, pts[:, 0])
+    y = np.interp(targets, cum_len, pts[:, 1])
+    return np.stack([x, y], axis=1)
 
 
 def trajectory_to_speed_yawrate(traj_xy, dt):
@@ -274,6 +292,25 @@ def maybe_apply_condition_preprocessor_scales(model, speed_scale, yaw_rate_scale
         condition_preprocessor.speed_scale = float(speed_scale)
     if hasattr(condition_preprocessor, "yaw_rate_scale"):
         condition_preprocessor.yaw_rate_scale = float(yaw_rate_scale)
+
+
+def maybe_apply_l2_num_steps(model, l2_num_steps):
+    """Override the frozen L2 predictor's sampler steps (its `l2_pred_NFE`).
+
+    L1 and L2 are sampled at different step counts: --num_steps is L1's NFE, while
+    L2's comes from the config's `l2_pred_NFE`. Setting the attribute post-init is
+    enough -- it is read at sample time, not at construction.
+    """
+    if l2_num_steps is None:
+        return
+
+    condition_preprocessor = getattr(model, "condition_preprocessor", None)
+    if condition_preprocessor is None or not hasattr(condition_preprocessor, "l2_pred_NFE"):
+        raise TypeError(
+            "--l2_num_steps was given but the loaded condition_preprocessor has no "
+            "`l2_pred_NFE` (so it has no separately-sampled L2 predictor)."
+        )
+    condition_preprocessor.l2_pred_NFE = int(l2_num_steps)
 
 
 def _rgb_to_cv2_color(color):
@@ -528,6 +565,7 @@ def generate_images(args, unknown_args):
             )
 
     maybe_apply_condition_preprocessor_scales(model, args.speed_scale, args.yaw_rate_scale)
+    maybe_apply_l2_num_steps(model, args.l2_num_steps)
 
     height, width = resolve_context_image_size(args, config)
     backend = resolve_video_backend()
@@ -570,9 +608,15 @@ def generate_images(args, unknown_args):
             args.steering_file, min_odo_steps, dtype=l1_tensor.dtype, device=args.device
         )
     elif args.trajectory_file is not None:
+        if min_odo_steps is None:
+            raise ValueError(
+                "--trajectory_file requires the model's condition_preprocessor to report a "
+                "required odometry length (get_required_rollout_odometry_steps returned None)."
+            )
         odometry_steps_per_image_frame = getattr(model.condition_preprocessor, "odometry_steps_per_image_frame", 1)
         dt = 1.0 / (args.l1_frame_rate * odometry_steps_per_image_frame)
-        traj_xy = load_trajectory_points(args.trajectory_file, min_odo_steps)
+        traj_xy = load_trajectory_points(args.trajectory_file)
+        traj_xy = resample_trajectory_by_arclength(traj_xy, min_odo_steps + 1)
         speed_yawrate = trajectory_to_speed_yawrate(traj_xy, dt)
         data_batch["steering"] = torch.as_tensor(
             speed_yawrate, dtype=l1_tensor.dtype, device=args.device
@@ -580,6 +624,22 @@ def generate_images(args, unknown_args):
     else:
         data_batch["steering"] = make_unconditional_steering(min_odo_steps, dtype=l1_tensor.dtype, device=args.device)
     data_batch["steering_format"] = STEERING_FORMAT
+
+    # Roll out `num_videos` futures in parallel from the same context, as a single
+    # minibatch. The context (and steering) is tiled along the batch dim; the sampler
+    # draws independent initial noise per element, so the futures diverge under one
+    # seed. Everything below is computed at the tiled batch size so condition_kwargs
+    # stays internally consistent.
+    num_videos = max(1, int(args.num_videos))
+    if num_videos > 1:
+        def _tile_batch(t):
+            return t.repeat(num_videos, *([1] * (t.dim() - 1)))
+
+        l1_tensor = _tile_batch(l1_tensor)
+        l2_tensor = _tile_batch(l2_tensor)
+        data_batch["images"] = l1_tensor
+        data_batch["l2_context"] = l2_tensor
+        data_batch["steering"] = _tile_batch(data_batch["steering"])
 
     condition_kwargs = model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout")
 
@@ -604,7 +664,7 @@ def generate_images(args, unknown_args):
             eta=args.eta,
             sample_with_ema=args.evaluate_ema,
             num_samples=l1_tensor.size(0),
-            frame_rate=frame_rate.unsqueeze(0),
+            frame_rate=frame_rate.reshape(1).repeat(l1_tensor.size(0)),
             condition_kwargs=condition_kwargs,
             decode_device=args.decode_device,
             num_condition_frames=l1_tensor.size(1),
@@ -623,23 +683,28 @@ def generate_images(args, unknown_args):
     # Release rollout-time latent state before CPU-side file I/O.
     del _latents, condition_kwargs, l1_tensor, l2_tensor
 
-    frames_dir = os.path.join(args.output_dir, "frames")
-    os.makedirs(frames_dir, exist_ok=True)
-    for f in range(gen_frames.shape[1]):
-        save_image(
-            (gen_frames[0, f] + 1.0) / 2.0,
-            os.path.join(frames_dir, f"frame_{f:04d}.jpg"),
-        )
+    # Save each rollout in the minibatch to its own sequence folder. The layout
+    # (fake_images/sequence_XXXX/frame_XXXX.jpg) matches what the demo app reads.
+    num_out = gen_frames.shape[0]
+    num_frames = gen_frames.shape[1]
+    for b in range(num_out):
+        seq_dir = os.path.join(args.output_dir, "fake_images", f"sequence_{b:04d}")
+        os.makedirs(seq_dir, exist_ok=True)
+        for f in range(num_frames):
+            save_image(
+                (gen_frames[b, f] + 1.0) / 2.0,
+                os.path.join(seq_dir, f"frame_{f:04d}.jpg"),
+            )
 
-    imageio.mimsave(
-        os.path.join(args.output_dir, "rollout.gif"),
-        [
-            np.array(Image.open(os.path.join(frames_dir, f"frame_{f:04d}.jpg")))
-            for f in range(gen_frames.shape[1])
-        ],
-        fps=args.l1_frame_rate,
-        loop=0,
-    )
+        imageio.mimsave(
+            os.path.join(args.output_dir, f"rollout_{b:04d}.gif"),
+            [
+                np.array(Image.open(os.path.join(seq_dir, f"frame_{f:04d}.jpg")))
+                for f in range(num_frames)
+            ],
+            fps=args.l1_frame_rate,
+            loop=0,
+        )
 
     if args.device.startswith("cuda"):
         logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.02f} GB")
@@ -687,6 +752,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the generated frames and GIF to.")
     parser.add_argument(
+        "--num_videos",
+        type=int,
+        default=1,
+        help="Number of futures to roll out in parallel from the same context, as one minibatch.",
+    )
+    parser.add_argument(
         "--vis_mode",
         type=str,
         default="none",
@@ -713,7 +784,14 @@ if __name__ == "__main__":
         default="cpu",
         help="Device used for decoded rollout frames. Use 'cpu' to reduce peak GPU memory during saving.",
     )
-    parser.add_argument("--num_steps", type=int, default=30, help="Number of steps for sampling")
+    parser.add_argument("--num_steps", type=int, default=30, help="Number of sampler steps (NFE) for the L1 detail predictor")
+    parser.add_argument(
+        "--l2_num_steps",
+        type=int,
+        default=None,
+        help="Number of sampler steps (NFE) for the frozen L2 abstract predictor. "
+             "Overrides the config's `l2_pred_NFE`; defaults to whatever the config sets.",
+    )
     parser.add_argument("--eta", type=float, default=0.0, help="Stochasticity for sampling")
     parser.add_argument("--evaluate_ema", "--use_ema", type=str2bool, default=True, help="If the evaluation happen with ema model")
     parser.add_argument(
