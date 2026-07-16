@@ -1,5 +1,6 @@
 import math
 import os
+import warnings
 from collections import OrderedDict
 from copy import deepcopy
 
@@ -708,7 +709,17 @@ class FlowMatchingSamplerHeunPlusEuler(FlowMatchingSampler):
         return expanded
 
     def _validate_sample_kwargs(self, eta, NFE):
-        del NFE  # step count is fully determined by step_schedule, not NFE
+        # Step count is fully determined by step_schedule, not NFE. NFE is only
+        # accepted for call-site compatibility (roll_out/PredictorModule/CLI
+        # scripts always pass some NFE value); warn rather than raise on
+        # mismatch since callers like log_images/roll_out pass a fixed NFE
+        # default with no real intent behind the specific number.
+        if NFE != len(self.step_schedule):
+            warnings.warn(
+                f"{self.__class__.__name__} ignores NFE={NFE}; it always runs its "
+                f"configured step_schedule ({len(self.step_schedule)} steps).",
+                stacklevel=3,
+            )
         if self._has_heun_steps and eta != 0.0:
             raise ValueError(
                 "step_schedule contains Heun steps, which are deterministic-only and cannot "
