@@ -654,6 +654,10 @@ class FlowMatchingSamplerHeunPlusEuler(FlowMatchingSampler):
     solver (heun or euler) and a step size (fraction of the
     [integration_t_eps, 1 - integration_t_eps] range). Step sizes must sum to
     exactly that range's width.
+
+    If `step_schedule` is omitted (the default), NFE drives the schedule
+    instead: NFE-1 uniform Heun steps followed by 1 uniform Euler step, sized
+    from NFE and integration_t_eps like every other sampler in this file.
     """
 
     _SOLVER_UPDATE_FNS = {
@@ -675,12 +679,13 @@ class FlowMatchingSamplerHeunPlusEuler(FlowMatchingSampler):
             integration_t_eps=integration_t_eps,
             timestep_conditioning=timestep_conditioning,
         )
-        self.step_schedule = self._expand_and_validate_schedule(step_schedule)
-        self._has_heun_steps = any(solver == "heun" for solver, _ in self.step_schedule)
+        self.step_schedule = (
+            None if step_schedule is None else self._expand_and_validate_schedule(step_schedule)
+        )
 
     def _expand_and_validate_schedule(self, step_schedule):
         if not step_schedule:
-            raise ValueError("step_schedule must be a non-empty list of blocks.")
+            raise ValueError("step_schedule, if provided, must be a non-empty list of blocks.")
 
         expanded = []
         for block_idx, block in enumerate(step_schedule):
@@ -708,28 +713,39 @@ class FlowMatchingSamplerHeunPlusEuler(FlowMatchingSampler):
             )
         return expanded
 
+    def _resolve_schedule(self, NFE):
+        if self.step_schedule is not None:
+            return self.step_schedule
+        if NFE < 1:
+            raise ValueError(f"NFE must be >= 1, got {NFE}.")
+        step_size = (1.0 - 2 * self.integration_t_eps) / NFE
+        return [("heun", step_size)] * (NFE - 1) + [("euler", step_size)]
+
     def _validate_sample_kwargs(self, eta, NFE):
-        # Step count is fully determined by step_schedule, not NFE. NFE is only
-        # accepted for call-site compatibility (roll_out/PredictorModule/CLI
-        # scripts always pass some NFE value); warn rather than raise on
-        # mismatch since callers like log_images/roll_out pass a fixed NFE
-        # default with no real intent behind the specific number.
-        if NFE != len(self.step_schedule):
+        schedule = self._resolve_schedule(NFE)
+        # When an explicit step_schedule is configured, NFE is only accepted
+        # for call-site compatibility (roll_out/PredictorModule/CLI scripts
+        # always pass some NFE value); warn rather than raise on mismatch
+        # since callers like log_images/roll_out pass a fixed NFE default
+        # with no real intent behind the specific number. When step_schedule
+        # is unset, NFE genuinely drives the schedule (see _resolve_schedule).
+        if self.step_schedule is not None and NFE != len(self.step_schedule):
             warnings.warn(
                 f"{self.__class__.__name__} ignores NFE={NFE}; it always runs its "
                 f"configured step_schedule ({len(self.step_schedule)} steps).",
                 stacklevel=3,
             )
-        if self._has_heun_steps and eta != 0.0:
+        has_heun_steps = any(solver == "heun" for solver, _ in schedule)
+        if has_heun_steps and eta != 0.0:
             raise ValueError(
-                "step_schedule contains Heun steps, which are deterministic-only and cannot "
-                f"be combined with the stochastic SDE term; got eta={eta}. Set eta=0.0."
+                "The active step schedule contains Heun steps, which are deterministic-only "
+                f"and cannot be combined with the stochastic SDE term; got eta={eta}. Set eta=0.0."
             )
 
-    def _build_schedule_t_steps(self, device):
+    def _build_schedule_t_steps(self, schedule, device):
         t = 1.0 - self.integration_t_eps
         t_values = [t]
-        for _, step_size in self.step_schedule:
+        for _, step_size in schedule:
             t -= step_size
             t_values.append(t)
         return torch.tensor(t_values, device=device)
@@ -747,12 +763,13 @@ class FlowMatchingSamplerHeunPlusEuler(FlowMatchingSampler):
         condition_kwargs=None,
         return_sample=False,
     ):
-        self._validate_sample_kwargs(eta, NFE)  # NFE accepted only for call-site compatibility
+        self._validate_sample_kwargs(eta, NFE)
+        schedule = self._resolve_schedule(NFE)
         net, device, context, model_condition_kwargs, frame_rate, target_t = self._prepare_sampling_state(
             images, latent, sample_with_ema, num_samples, frame_rate, condition_kwargs
         )
-        t_steps = self._build_schedule_t_steps(device)
-        for i, (solver, _step_size) in enumerate(self.step_schedule):
+        t_steps = self._build_schedule_t_steps(schedule, device)
+        for i, (solver, _step_size) in enumerate(schedule):
             target_t = self._SOLVER_UPDATE_FNS[solver](
                 self._eval_velocity, net, context, target_t, t_steps[i], t_steps[i + 1],
                 frame_rate, model_condition_kwargs, eta,
