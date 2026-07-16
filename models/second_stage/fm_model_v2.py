@@ -494,7 +494,11 @@ class FlowMatchingSampler:
         model_input = self._build_model_inputs(context, target_t, t_scalar)
         model_t = self._build_model_t(context, target_t, t_scalar)
         pred = net(model_input, t=model_t * self.timescale, frame_rate=frame_rate, **model_condition_kwargs)
-        return self._extract_target_prediction(pred)
+        # Clone: under torch.compile(mode="reduce-overhead") (CUDA graphs), `pred`
+        # is a view into a static output buffer that gets overwritten by the next
+        # call to `net` — multi-eval-per-step solvers (e.g. Heun) call `net` again
+        # before consuming this result, so it must be an independent copy.
+        return self._extract_target_prediction(pred).clone()
 
     def _validate_sample_kwargs(self, eta, NFE):
         """No-op hook; solvers override to enforce solver-specific constraints."""
