@@ -97,7 +97,7 @@ An example trajectory is provided in `example_trajectory.csv`. Ready-made steeri
 | `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_artifacts` to cache the compiled graphs across runs. |
 
 
-## BibTeX
+## BibTeX (TODO)
 ```bibtex
 @article{orbis2_2026,
   author    = {Mittal, Sudhanshu and Mousakhan, Arian and Galesso, Silvio and
