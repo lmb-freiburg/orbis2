@@ -1,6 +1,6 @@
 # Orbis 2: A Hierarchical World Model for Driving
 **Official Implementation**
-## [Paper (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
+## [Paper (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace Demo](https://huggingface.co/spaces/sud0301/orbis2_test) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
 
 >[Sudhanshu Mittal*](https://lmb.informatik.uni-freiburg.de/people/mittal/), [Arian Mousakhan*](https://lmb.informatik.uni-freiburg.de/people/mousakha/), [Silvio Galesso*](https://lmb.informatik.uni-freiburg.de/people/galessos/), [Karim Farid](https://lmb.informatik.uni-freiburg.de/people/faridk/), [Johannes Dienert](https://lmb.informatik.uni-freiburg.de/people/dienertj/), [Rajat Sahay](https://lmb.informatik.uni-freiburg.de/people/sahayr/), [Thomas Brox](https://lmb.informatik.uni-freiburg.de/people/brox/index.html)
 > <br>University of Freiburg<br>
@@ -30,7 +30,7 @@ conda activate orbis2_env
 ```
 
 ## Checkpoints
-Link to the [Checkpoints (TODO)](https://huggingface.co/lmb-freiburg/Orbis/tree/main/checkpoints) on Huggingface.
+Link to the [Checkpoints](https://huggingface.co/sud0301/orbis2_test) on Huggingface.
 
 Each experiment directory contains the model config and its checkpoint: (TODO)
 ```
