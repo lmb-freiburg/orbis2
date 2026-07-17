@@ -2,7 +2,7 @@
 **Official Implementation**
 ## [Paper (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
 
->[Sudhanshu Mittal*](https://lmb.informatik.uni-freiburg.de/people/mittal/), [Arian Mousakhan*](https://lmb.informatik.uni-freiburg.de/people/mousakha/), [Silvio Galesso*](https://lmb.informatik.uni-freiburg.de/people/galessos/), [Karim Farid](https://lmb.informatik.uni-freiburg.de/people/faridk/), [Jonannes Dienert](https://lmb.informatik.uni-freiburg.de/people/dienertj/), [Rajat Sahay](https://lmb.informatik.uni-freiburg.de/people/sahayr/), [Thomas Brox](https://lmb.informatik.uni-freiburg.de/people/brox/index.html)
+>[Sudhanshu Mittal*](https://lmb.informatik.uni-freiburg.de/people/mittal/), [Arian Mousakhan*](https://lmb.informatik.uni-freiburg.de/people/mousakha/), [Silvio Galesso*](https://lmb.informatik.uni-freiburg.de/people/galessos/), [Karim Farid](https://lmb.informatik.uni-freiburg.de/people/faridk/), [Johannes Dienert](https://lmb.informatik.uni-freiburg.de/people/dienertj/), [Rajat Sahay](https://lmb.informatik.uni-freiburg.de/people/sahayr/), [Thomas Brox](https://lmb.informatik.uni-freiburg.de/people/brox/index.html)
 > <br>University of Freiburg<br>
 > <sub>* Main contributors</sub>
 
@@ -95,6 +95,8 @@ An example trajectory is provided in `example_trajectory.csv`. Ready-made steeri
 | `--vis_mode` | `none`, `trajectory` (static bird's-eye panel), or `trajectory_ego` (ego-centric panel that follows the current pose). |
 | `--speed_scale`, `--yaw_rate_scale` | Global multiplicative factors on the raw speed / yaw-rate conditioning. |
 | `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_artifacts` to cache the compiled graphs across runs. |
+
+## License (TODO)
 
 
 ## BibTeX (TODO)
