@@ -3,9 +3,9 @@ from copy import deepcopy
 
 import torch
 
+from modules.fm_samplers import FlowMatchingSamplerEuler
 from .fm_model_v2 import (
     FlowMatchingObjective,
-    FlowMatchingSamplerEuler,
     PredictorModule,
     requires_grad,
     update_ema,
