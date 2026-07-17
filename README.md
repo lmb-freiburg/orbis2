@@ -31,7 +31,9 @@ conda activate orbis2_env
 
 ## Checkpoints
 Link to the [Checkpoints](https://huggingface.co/sud0301/orbis2_test) on Huggingface.
+The checkpoints repository contains the necessary model weights and config files.
 
+<!--
 Each experiment directory contains the model config and its checkpoint: (TODO)
 ```
 logs_wm/orbis2_stage2_450M_288x512_10hz/
@@ -44,6 +46,7 @@ Move the downloaded checkpoint into the relevant experiment directory, e.g.:
 ```bash
 mv last.ckpt logs_wm/orbis2_stage2_450M_288x512_10hz/checkpoints/
 ```
+-->
 
 ## Steerable Video Generation (Roll-out)
 `evaluate/rollout_demo_v2.py` rolls out the world model from a single input video: it samples the L1 (high-rate) and L2 (low-rate, further back in time) context windows directly from the video, then autoregressively generates future frames.
