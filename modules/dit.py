@@ -149,7 +149,7 @@ class TimestepEmbedder(nn.Module):
    """
    Embeds scalar timesteps into vector representations.
    """
-   def __init__(self, hidden_size, frequency_embedding_size=256):
+   def __init__(self, hidden_size, frequency_embedding_size=256, max_period=10000):
        super().__init__()
        self.mlp = nn.Sequential(
            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
@@ -157,24 +157,26 @@ class TimestepEmbedder(nn.Module):
            nn.Linear(hidden_size, hidden_size, bias=True),
        )
        self.frequency_embedding_size = frequency_embedding_size
+       # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+       half = frequency_embedding_size // 2
+       freqs = torch.exp(
+           -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+       )
+       # Registered as a buffer (not recomputed per call) so it moves with the module's
+       # device/dtype casts. Under torch.compile, reading `t.device` here instead used to
+       # crash dynamo (ConstantVariable can't wrap torch.device on some builds); reusing the
+       # buffer's own device sidesteps that op entirely.
+       self.register_buffer("_freqs", freqs, persistent=False)
 
-
-   @staticmethod
-   def timestep_embedding(t, dim, max_period=10000):
+   def timestep_embedding(self, t, dim):
        """
        Create sinusoidal timestep embeddings.
        :param t: a 1-D Tensor of N indices, one per batch element.
                          These may be fractional.
        :param dim: the dimension of the output.
-       :param max_period: controls the minimum frequency of the embeddings.
        :return: an (N, D) Tensor of positional embeddings.
        """
-       # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-       half = dim // 2
-       freqs = torch.exp(
-           -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-       ).to(device=t.device)
-       args = t[:, None].float() * freqs[None]
+       args = t[:, None].float() * self._freqs[None]
        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
        if dim % 2:
            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
