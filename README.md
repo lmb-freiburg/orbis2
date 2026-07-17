@@ -96,7 +96,7 @@ An example trajectory is provided in `example_trajectory.csv`. Ready-made steeri
 | `--num_steps` | Sampler steps (NFE) for the L1 predictor. Distilled models (`config_distill.yaml`) need only a few steps (e.g. 5); non-distilled models use more (e.g. 30). |
 | `--num_videos` | Number of futures to roll out in parallel from the same context. |
 | `--vis_mode` | `none`, `trajectory` (static bird's-eye panel), or `trajectory_ego` (ego-centric panel that follows the current pose). |
-| `--speed_scale`, `--yaw_rate_scale` | Global multiplicative factors on the raw speed / yaw-rate conditioning. |
+| `--speed_scale`, `--yaw_rate_scale` | Global multiplicative factors on the raw speed / yaw-rate conditioning, used for the counterfactual steering evaluation in the paper. |
 | `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_artifacts` to cache the compiled graphs across runs. |
 
 ## License (TODO)
