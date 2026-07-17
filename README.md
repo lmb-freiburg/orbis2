@@ -1,4 +1,4 @@
-# Orbis-2: Steerable Long-Horizon Driving World Models
+# Orbis 2: A Hierarchical World Model for Driving
 **Official Implementation**
 ## [Paper (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace (TODO)](https://arxiv.org/abs/XXXX.XXXXX) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
 
