@@ -1,8 +1,6 @@
 import torch
 import timm
 from torch import nn
-from omegaconf import ListConfig
-from einops import rearrange
 
 
 from typing import Tuple, Union

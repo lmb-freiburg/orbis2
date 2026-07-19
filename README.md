@@ -30,35 +30,28 @@ conda activate orbis2_env
 ```
 
 ## Checkpoints
-Link to the [Checkpoints](https://huggingface.co/sud0301/orbis2_test) on Huggingface.
-The checkpoints repository contains the necessary model weights and config files.
-
-<!--
-Each experiment directory contains the model config and its checkpoint: (TODO)
-```
-logs_wm/orbis2_stage2_450M_288x512_10hz/
-├── config.yaml
-└── checkpoints/
-    └── last.ckpt
-```
-
-Move the downloaded checkpoint into the relevant experiment directory, e.g.:
+Clone the [Huggingface repository](TODO) containing the necessary model weights and config files:
 ```bash
-mv last.ckpt logs_wm/orbis2_stage2_450M_288x512_10hz/checkpoints/
+git clone TODO
 ```
--->
 
-## Steerable Video Generation (Roll-out)
+## Video Generation (Roll-out)
 `evaluate/rollout_demo_v2.py` rolls out the world model from a single input video: it samples the L1 (high-rate) and L2 (low-rate, further back in time) context windows directly from the video, then autoregressively generates future frames.
+
+Set the environment variable `ORBIS2_MODELS_DIR` with the path of the checkpoints folder, e.g.:
+```bash
+export ORBIS2_MODELS_DIR=(TODO)
+```
+
+To roll out the model on a custom input video
 
 To roll out with trajectory steering and an ego-centric trajectory overlay:
 ```bash
 python evaluate/rollout_demo_v2.py \
     --exp_dir logs_wm/orbis2_stage2_450M_288x512_10hz \
-    --config config.yaml \
+    --config L1/config.yaml \
     --video /path/to/input_video.mp4 \
-    --l1_frame_rate 10 \
-    --num_steps 5 \
+    --l1_nfe 5 \
     --num_gen_frames 7 \
     --trajectory_file example_trajectory.csv \
     --vis_mode trajectory_ego \
@@ -69,10 +62,9 @@ To roll out **without steering** (unconditional generation), simply omit the ste
 ```bash
 python evaluate/rollout_demo_v2.py \
     --exp_dir logs_wm/orbis2_stage2_450M_288x512_10hz \
-    --config config.yaml \
+    --config L1/config.yaml \
     --video /path/to/input_video.mp4 \
-    --l1_frame_rate 10 \
-    --num_steps 5 \
+    --l1_nfe 5 \
     --num_gen_frames 60 \
     --output_dir rollout_uncond
 ```
@@ -89,15 +81,20 @@ The model supports three steering modes (the first two are mutually exclusive):
 An example trajectory is provided in `example_trajectory.csv`. Ready-made steering profiles (e.g. sharp left/right turns at fixed speed) can be found in `steering_values/`.
 
 ### Useful options
+The L1 frame rate is not a CLI argument: it is read automatically from the config (`data.params.validation.params.frame_rate`).
+
 | Argument | Description |
 |---|---|
-| `--l1_frame_rate` | Frame rate (Hz) to sample the L1 context and generate at; must evenly divide the video's native frame rate. |
+| `--exp_dir` | Path to the experiment directory containing the config and checkpoint. Defaults to the `ORBIS2_MODELS_DIR` environment variable if not given. |
+| `--ckpt`, `--config` | Checkpoint/config paths, relative to `--exp_dir`. Default to `L1/checkpoints/last.ckpt` and `L1/config.yaml`. |
 | `--start_frame` | Native-video frame index where the L1 context window starts (defaults to the latest window that fits). Enough video history must precede it for the L2 context. |
-| `--num_steps` | Sampler steps (NFE) for the L1 predictor. Distilled models (`config_distill.yaml`) need only a few steps (e.g. 5); non-distilled models use more (e.g. 30). |
-| `--num_videos` | Number of futures to roll out in parallel from the same context. |
+| `--l1_nfe` | Sampler steps (NFE) for the L1 predictor. Distilled models (`config_distill.yaml`) need only a few steps (e.g. 5); non-distilled models use more (e.g. 30). |
+| `--l2_nfe` | Sampler steps (NFE) for the frozen L2 predictor. Overrides the config's `l2_pred_NFE`; defaults to whatever the config sets. |
 | `--vis_mode` | `none`, `trajectory` (static bird's-eye panel), or `trajectory_ego` (ego-centric panel that follows the current pose). |
 | `--speed_scale`, `--yaw_rate_scale` | Global multiplicative factors on the raw speed / yaw-rate conditioning, used for the counterfactual steering evaluation in the paper. |
-| `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_artifacts` to cache the compiled graphs across runs. |
+| `--evaluate_ema` / `--use_ema` | Whether to sample with the EMA weights (default `True`). |
+| `--decode_device` | Device used for decoded rollout frames; `cpu` (default) reduces peak GPU memory during saving. |
+| `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_mode` and `--compile_artifacts` to tune / cache the compiled graphs across runs. |
 
 ## License (TODO)
 
