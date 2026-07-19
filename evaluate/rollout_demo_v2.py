@@ -451,7 +451,7 @@ if __name__ == "__main__":
         help="Path to the experiment directory, where the config and checkpoints are stored. "
              "Defaults to the ORBIS2_MODELS_DIR environment variable.",
     )
-    parser.add_argument("--ckpt", type=str, default="checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
+    parser.add_argument("--ckpt", type=str, default="L1/checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
     parser.add_argument("--config", type=str, default="L1/config.yaml", help="Path to the config file, relative to exp_dir")
     parser.add_argument("--video", type=str, required=True, help="Path to the input video file to sample L1/L2 context from.")
     parser.add_argument("--start_frame", type=int, default=None, help="Native-video frame index to start the L1 context window at. Defaults to the latest window that fits (the end of the video).")
