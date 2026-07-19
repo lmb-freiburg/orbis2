@@ -3,13 +3,13 @@ import os
 import sys
 import imageio
 import logging
+import importlib
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from omegaconf.errors import ConfigTypeError
 from PIL import Image
 from pytorch_lightning import seed_everything
 from torchvision.utils import save_image
@@ -26,12 +26,25 @@ from evaluate.utils import (
     resolve_video_backend,
     str2bool,
 )
-from util import instantiate_from_config
 
 
 logger = logging.getLogger(__name__)
 
 STEERING_FORMAT = "speed_yawrate"
+
+
+def get_obj_from_str(string, reload=False):
+    module, cls = string.rsplit(".", 1)
+    if reload:
+        module_imp = importlib.import_module(module)
+        importlib.reload(module_imp)
+    return getattr(importlib.import_module(module, package=None), cls)
+
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
 
 class _L1L2FrameIndexer(L2ContextMixin):
@@ -50,12 +63,9 @@ class _L1L2FrameIndexer(L2ContextMixin):
 
 def resolve_context_image_size(config):
     """Return (height, width) to resize context images to, from the inference config."""
-    try:
-        size = OmegaConf.select(config, "data.params.validation.params.size")
-    except ConfigTypeError:
-        size = None
+    size = OmegaConf.select(config, "data.params.validation.params.size")
     if size is None:
-        size = config.data.params.train[0].params.size
+        raise ValueError("Config is missing `data.params.validation.params.size`.")
     size = (size, size) if isinstance(size, int) else tuple(size)
     return int(size[0]), int(size[1])
 
@@ -79,12 +89,9 @@ def resolve_l2_frame_rate(model):
 
 def resolve_l1_frame_rate(config):
     """Return the L1 (context/rollout) frame rate (Hz) declared in the inference config."""
-    try:
-        frame_rate = OmegaConf.select(config, "data.params.validation.params.frame_rate")
-    except ConfigTypeError:
-        frame_rate = None
+    frame_rate = OmegaConf.select(config, "data.params.validation.params.frame_rate")
     if frame_rate is None:
-        frame_rate = config.data.params.train[0].params.frame_rate
+        raise ValueError("Config is missing `data.params.validation.params.frame_rate`.")
     return float(frame_rate)
 
 

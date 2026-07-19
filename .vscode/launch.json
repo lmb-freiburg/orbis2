@@ -12,16 +12,9 @@
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
-                "--exp_dir",
-                "checkpoints/orbis2_test/L1", "--config=config_distill.yaml",
                 "--video=/data/nxtaimraid03/datasets/nvidia_physicalAI_AV/camera/nvidia_minYR0.05_10Hz_288x512_GoP8/0fe5c9c8-a613-44a1-9508-8de27d985c82.camera_front_wide_120fov.mp4",
-                
-                // "--steering_file=/data/nxtaimraid02/galessos/repos/orbis/steering_values_fromfile/curvature_eval/sharp_left.csv",
-                "--l1_frame_rate=10",
-                // "--start_frame=70",
 
                 "--output_dir=scratch/rollout",
-                "--num_steps=5",
                 "--num_gen_frames=7",
                 // "--compile=True",
 
