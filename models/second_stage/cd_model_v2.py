@@ -205,21 +205,25 @@ class ConsistencyDistillationSampler(FlowMatchingSamplerEuler):
 
 class ConsistencyDistillPredictorModule(PredictorModule):
     """
-    PredictorModule specialization that distills a frozen teacher (loaded from
-    `teacher_ckpt_path`) into a few-step student via consistency distillation.
+    PredictorModule specialization that distills a frozen teacher into a
+    few-step student via consistency distillation. `teacher_ckpt_path`
+    initializes the student (`vit`/`ema_vit`) from the teacher and builds the
+    frozen `teacher_vit` used by the distillation loss; it is required for
+    training/validation but optional for inference-only sample()/roll_out().
     The deliverable is `ema_vit` (evaluate with sample_with_ema=True, NFE 1/2/4).
     """
 
     # `teacher_vit.*` is intentionally absent from saved checkpoints (see
-    # on_save_checkpoint below) since the teacher is always reloaded fresh from
-    # teacher_ckpt_path at __init__ time. Eval scripts that assert on
+    # on_save_checkpoint below): when teacher_ckpt_path is set, the teacher is
+    # always reloaded fresh from it at __init__ time; when it is not set,
+    # teacher_vit doesn't exist at all. Either way, eval scripts that assert on
     # load_state_dict(...).missing_keys should exempt these prefixes.
     checkpoint_exempt_key_prefixes = ("teacher_vit.",)
 
     def __init__(
         self,
         *,
-        teacher_ckpt_path,
+        teacher_ckpt_path=None,
         cd_ema_mu=0.999,
         cd_weight_decay=0.0,
         **kwargs,
@@ -229,34 +233,45 @@ class ConsistencyDistillPredictorModule(PredictorModule):
         self.cd_weight_decay = cd_weight_decay
         self.strict_loading = False
 
-        checkpoint_path = os.path.expandvars(teacher_ckpt_path)
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"teacher_ckpt_path {checkpoint_path} does not exist.")
+        self.teacher_vit = None
+        if teacher_ckpt_path is not None:
+            checkpoint_path = os.path.expandvars(teacher_ckpt_path)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"teacher_ckpt_path {checkpoint_path} does not exist.")
 
-        try:
-            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True, mmap=True)["state_dict"]
-        except (TypeError, RuntimeError):
-            state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)["state_dict"]
+            try:
+                state_dict = torch.load(
+                    checkpoint_path, map_location="cpu", weights_only=True, mmap=True
+                )["state_dict"]
+            except (TypeError, RuntimeError):
+                state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)["state_dict"]
 
-        ema_state_dict = {
-            key[len("ema_vit.") :]: value.clone()
-            for key, value in state_dict.items()
-            if key.startswith("ema_vit.")
-        }
-        del state_dict
-        if not ema_state_dict:
-            raise ValueError(f"No ema_vit.* keys found in teacher checkpoint {checkpoint_path}.")
+            ema_state_dict = {
+                key[len("ema_vit.") :]: value.clone()
+                for key, value in state_dict.items()
+                if key.startswith("ema_vit.")
+            }
+            del state_dict
+            if not ema_state_dict:
+                raise ValueError(f"No ema_vit.* keys found in teacher checkpoint {checkpoint_path}.")
 
-        self.vit.load_state_dict(ema_state_dict, strict=True)
-        self.ema_vit.load_state_dict(ema_state_dict, strict=True)
-        self.teacher_vit = deepcopy(self.vit)
-        requires_grad(self.teacher_vit, False)
-        self.teacher_vit.eval()
+            self.vit.load_state_dict(ema_state_dict, strict=True)
+            self.ema_vit.load_state_dict(ema_state_dict, strict=True)
+            self.teacher_vit = deepcopy(self.vit)
+            requires_grad(self.teacher_vit, False)
+            self.teacher_vit.eval()
 
     def setup(self, stage=None):
         super().setup(stage)
-        if hasattr(self, "teacher_vit") and self.teacher_vit is not None:
+        if self.teacher_vit is not None:
             self.teacher_vit.requires_grad_(False)
+        elif stage in ("fit", "validate"):
+            raise RuntimeError(
+                "ConsistencyDistillPredictorModule requires teacher_ckpt_path to be set "
+                f"when stage={stage!r} (training/validation use a frozen teacher for "
+                "consistency distillation). Pass teacher_ckpt_path in the model config, "
+                "or omit it only for inference (sample()/roll_out())."
+            )
 
     def configure_optimizers(self):
         params = [p for p in self.vit.parameters() if p.requires_grad]
