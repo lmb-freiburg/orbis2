@@ -15,7 +15,7 @@
                 "--video=/data/nxtaimraid03/datasets/nvidia_physicalAI_AV/camera/nvidia_minYR0.05_10Hz_288x512_GoP8/0fe5c9c8-a613-44a1-9508-8de27d985c82.camera_front_wide_120fov.mp4",
                 "--output_dir=scratch/rollout",
 
-                // "--config=L1/"
+                // "--config=L1/config_distill.yaml"
 
                 "--num_gen_frames=7",
 

@@ -321,7 +321,7 @@ def generate_images(args, unknown_args):
         device=args.device,
     )
 
-    num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
+    num_future_frames = get_rollout_future_frame_count(model, args.num_rollout_steps)
     frame_rate = torch.tensor(l1_frame_rate, device=args.device)
     data_batch = {"images": l1_tensor, "l2_context": l2_tensor, "frame_rate": frame_rate}
 
@@ -335,7 +335,7 @@ def generate_images(args, unknown_args):
             validation_params=None,
             num_condition_frames=l1_context_frames,
             num_gen_frames=num_future_frames,
-            rollout_steps=args.num_gen_frames,
+            rollout_steps=args.num_rollout_steps,
         )
     if args.steering_file is not None:
         data_batch["steering"] = load_steering_trajectory(
@@ -376,7 +376,7 @@ def generate_images(args, unknown_args):
     with torch.autocast(dtype=torch.float16, device_type="cuda", enabled=autocast_enabled):
         _latents, gen_frames = model.roll_out(
             x_0={"images": l1_tensor},
-            num_gen_frames=args.num_gen_frames,
+            num_gen_frames=args.num_rollout_steps,
             latent_input=False,
             NFE=args.l1_nfe,
             eta=0.0,
@@ -392,7 +392,7 @@ def generate_images(args, unknown_args):
         overlay_trajectory = model.condition_preprocessor.get_rollout_visualization_trajectory(
             condition_kwargs=model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout"),
             num_condition_frames=l1_context_frames,
-            num_gen_steps=args.num_gen_frames,
+            num_gen_steps=args.num_rollout_steps,
             num_pred_frames=model.num_pred_frames,
         )
         if overlay_trajectory is not None:
@@ -456,9 +456,9 @@ if __name__ == "__main__":
     parser.add_argument("--video", type=str, required=True, help="Path to the input video file to sample L1/L2 context from.")
     parser.add_argument("--start_frame", type=int, default=None, help="Native-video frame index to start the L1 context window at. Defaults to the latest window that fits (the end of the video).")
     parser.add_argument(
-        "--num_gen_frames",
+        "--num_rollout_steps",
         type=int,
-        default=1,
+        default=10,
         help="Number of rollout steps to generate; each step predicts `model.num_pred_frames` future frames.",
     )
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the generated frames and GIF to.")

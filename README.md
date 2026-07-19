@@ -43,53 +43,31 @@ Set the environment variable `ORBIS2_MODELS_DIR` with the path of the checkpoint
 export ORBIS2_MODELS_DIR=(TODO)
 ```
 
-To roll out the model on a custom input video
-
-To roll out with trajectory steering and an ego-centric trajectory overlay:
+To roll out the model using an input context video:
 ```bash
 python evaluate/rollout_demo_v2.py \
-    --exp_dir logs_wm/orbis2_stage2_450M_288x512_10hz \
-    --config L1/config.yaml \
     --video /path/to/input_video.mp4 \
-    --l1_nfe 5 \
-    --num_gen_frames 7 \
-    --trajectory_file example_trajectory.csv \
-    --vis_mode trajectory_ego \
     --output_dir rollout
 ```
 
-To roll out **without steering** (unconditional generation), simply omit the steering arguments:
+To roll out with trajectory steering and an ego-centric trajectory overlay, specify an input trajectory file:
 ```bash
 python evaluate/rollout_demo_v2.py \
-    --exp_dir logs_wm/orbis2_stage2_450M_288x512_10hz \
-    --config L1/config.yaml \
     --video /path/to/input_video.mp4 \
-    --l1_nfe 5 \
-    --num_gen_frames 60 \
-    --output_dir rollout_uncond
+    --trajectory_file trajectory.csv \
+    --vis_mode trajectory_ego \
+    --output_dir rollout_traj
 ```
 
-Each rollout step predicts `model.num_pred_frames` future frames, so the total number of generated frames is `num_gen_frames × num_pred_frames`. Results are written to `--output_dir`: individual frames under `fake_images/sequence_XXXX/frame_XXXX.jpg` and one animated `rollout_XXXX.gif` per generated sequence.
-
-### Steering inputs
-The model supports three steering modes (the first two are mutually exclusive):
-
-- **`--trajectory_file`**: a `.csv` or `.npy` file with `[T, 2]` rows of raw `(x, y)` trajectory points in meters (forward, lateral, local ego frame). The path is resampled by arc length to the rollout length and converted to speed / yaw-rate conditioning via finite differences — so a hand-drawn or planned path of any temporal resolution can be used directly.
-- **`--steering_file`**: a `.csv` or `.npy` file with `[T, 2]` rows of raw `(speed, yaw_rate)` values, already at the odometry rate expected by the model.
-- **Neither**: the rollout runs unconditionally (no steering).
-
-An example trajectory is provided in `example_trajectory.csv`. Ready-made steering profiles (e.g. sharp left/right turns at fixed speed) can be found in `steering_values/`.
 
 ### Useful options
 The L1 frame rate is not a CLI argument: it is read automatically from the config (`data.params.validation.params.frame_rate`).
 
 | Argument | Description |
 |---|---|
-| `--exp_dir` | Path to the experiment directory containing the config and checkpoint. Defaults to the `ORBIS2_MODELS_DIR` environment variable if not given. |
-| `--ckpt`, `--config` | Checkpoint/config paths, relative to `--exp_dir`. Default to `L1/checkpoints/last.ckpt` and `L1/config.yaml`. |
+|`--num_rollout_steps`| Number of rollout steps to perform. Each step generates 0.5s of video. |
+| `--config` | Config path, relative to `$ORBIS2_MODELS_DIR`. For example, it can be set to `L1/config_distill.yaml` |
 | `--start_frame` | Native-video frame index where the L1 context window starts (defaults to the latest window that fits). Enough video history must precede it for the L2 context. |
-| `--l1_nfe` | Sampler steps (NFE) for the L1 predictor. Distilled models (`config_distill.yaml`) need only a few steps (e.g. 5); non-distilled models use more (e.g. 30). |
-| `--l2_nfe` | Sampler steps (NFE) for the frozen L2 predictor. Overrides the config's `l2_pred_NFE`; defaults to whatever the config sets. |
 | `--vis_mode` | `none`, `trajectory` (static bird's-eye panel), or `trajectory_ego` (ego-centric panel that follows the current pose). |
 | `--speed_scale`, `--yaw_rate_scale` | Global multiplicative factors on the raw speed / yaw-rate conditioning, used for the counterfactual steering evaluation in the paper. |
 | `--evaluate_ema` / `--use_ema` | Whether to sample with the EMA weights (default `True`). |
