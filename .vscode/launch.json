@@ -13,7 +13,7 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "--exp_dir",
-                "/data/nxtaimraid02/galessos/repos/orbis/logs_wm/orbis_stage2_450M_vq_if_tok_rec_x0_1_288x512_10hz_L2_CtxAndLast_scratch_tok3_DLC442251_V2Migrated/", "--config=config_distill.yaml",
+                "checkpoints/orbis2_test/L1", "--config=config_distill.yaml",
                 "--video=/data/nxtaimraid03/datasets/nvidia_physicalAI_AV/camera/nvidia_minYR0.05_10Hz_288x512_GoP8/0fe5c9c8-a613-44a1-9508-8de27d985c82.camera_front_wide_120fov.mp4",
                 
                 // "--steering_file=/data/nxtaimraid02/galessos/repos/orbis/steering_values_fromfile/curvature_eval/sharp_left.csv",
@@ -26,11 +26,12 @@
                 // "--compile=True",
 
 
-                "--trajectory_file=example_trajectory.csv",
-                "--vis_mode=trajectory_ego",
+                // "--trajectory_file=example_trajectory.csv",
+                // "--vis_mode=trajectory_ego",
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "1",
+                "ORBIS2_MODELS_DIR": "checkpoints/orbis2_test"
             }
         }
     ]

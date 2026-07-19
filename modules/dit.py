@@ -74,14 +74,16 @@ class FrequencyEncoder:
        normalized_freq = (frequencies - self.freq_min) / (self.freq_max - self.freq_min)
 
 
-       # Generate positional features using sine and cosine
-       positions = torch.arange(0, self.embed_dim, dtype=torch.float32, device=frequencies.device)
+       # Generate positional features using sine and cosine. `frequencies` supplies the device
+       # via new_tensor/new_zeros instead of a bare `.device` read, which crashes Dynamo on
+       # some torch builds (see TimestepEmbedder in modules/dit.py for the same issue).
+       positions = frequencies.new_tensor(range(self.embed_dim), dtype=torch.float32)
        scaling_factors = 1 / (10000 ** (2 * (positions // 2) / self.embed_dim))
        frequency_features = normalized_freq.unsqueeze(1) * scaling_factors  # Shape: (batch_size, embed_dim)
 
 
        # Apply sine to even indices and cosine to odd indices
-       encoded_freq = torch.zeros(batch_size, self.embed_dim, device=frequencies.device)
+       encoded_freq = frequencies.new_zeros(batch_size, self.embed_dim, dtype=torch.get_default_dtype())
        encoded_freq[:, 0::2] = torch.sin(frequency_features[:, 0::2])  # Sine for even indices
        encoded_freq[:, 1::2] = torch.cos(frequency_features[:, 1::2])  # Cosine for odd indices
 
@@ -420,7 +422,9 @@ class STDiTBlock(nn.Module):
 
         x_modulated = modulate(self.norm_time_attn(x), shift_mta, scale_mta)
         x_modulated = rearrange(x_modulated, 'b f n d -> (b n) f d', b=B, f=F, n=N)
-        time_attn_mask = torch.tril(torch.ones(F, F, device=x.device)) if self.causal_time_attn else None
+        # x supplies the device via new_ones instead of a bare `.device` read, which crashes
+        # Dynamo on some torch builds (see TimestepEmbedder above for the same issue).
+        time_attn_mask = torch.tril(x.new_ones(F, F, dtype=torch.get_default_dtype())) if self.causal_time_attn else None
         x_ = self.time_attn(x_modulated, attn_mask=time_attn_mask)
         x_ = rearrange(x_, '(b n) f d -> b f n d', b=B, n=N, f=F)
         x = x + _broadcast_gate(gate_mta, x) * x_

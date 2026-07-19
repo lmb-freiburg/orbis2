@@ -177,9 +177,12 @@ class SequenceGlobalAdditiveConditioner(GlobalAdditiveConditioner):
                 f"Increase sequence_length or truncate inputs."
             )
 
-        # [K, H] -> [1, K, H], broadcast over batch
+        # [K, H] -> [1, K, H], broadcast over batch. positional_embeddings already lives on
+        # the model's device (moved there before compile), so only dtype needs matching;
+        # reading embedding.device explicitly crashes Dynamo on some torch builds (see
+        # TimestepEmbedder in modules/dit.py for the same issue).
         pos = self.positional_embeddings[condition_name][:k].unsqueeze(0)
-        pos = pos.to(device=embedding.device, dtype=embedding.dtype)
+        pos = pos.to(dtype=embedding.dtype)
         return embedding + pos
 
 
@@ -319,10 +322,13 @@ class DiT(nn.Module):
             )
         return alignment
 
-    def _get_frame_embeddings(self, num_frames, device):
+    def _get_frame_embeddings(self, num_frames):
+        # frame_emb is a parameter, already on the model's device; no `.to(device)` needed
+        # (and reading a traced tensor's `.device` to build one crashes Dynamo on some
+        # torch builds, see TimestepEmbedder in modules/dit.py).
         if self.frame_embedding_alignment == "prefix":
-            return self.frame_emb[:, :num_frames].to(device)
-        return self.frame_emb[:, self.max_num_frames - num_frames :].to(device)
+            return self.frame_emb[:, :num_frames]
+        return self.frame_emb[:, self.max_num_frames - num_frames :]
 
     def _get_common_block_kwargs(self, layer_idx):
         return {
@@ -434,11 +440,16 @@ class DiT(nn.Module):
             return _embed_timesteps_with(t, self.t_embedder)
         return self.conditioner(t=t, t_embedder=self.t_embedder, **_kwargs)
 
-    def _get_frame_rate_embeddings(self, frame_rate, batch_size, num_frames, device):
+    def _get_frame_rate_embeddings(self, frame_rate, batch_size, num_frames, reference):
+        # `reference` (the input tensor x) supplies the device for new_zeros instead of a bare
+        # `.device` read, which crashes Dynamo on some torch builds (see TimestepEmbedder in
+        # modules/dit.py). dtype is pinned to the default (matching the prior torch.zeros(...)
+        # call) rather than inherited from `reference`, since frame_rate_embeddings below isn't
+        # cast to x's dtype either. frame_rate, when given, is expected to already share x's device.
         if frame_rate is None:
-            return torch.zeros(batch_size, 1, 1, self.hidden_size, device=device)
+            return reference.new_zeros(batch_size, 1, 1, self.hidden_size, dtype=torch.get_default_dtype())
 
-        frame_rate_embeddings = self.frame_rate_encoder.encode(frame_rate).to(device)
+        frame_rate_embeddings = self.frame_rate_encoder.encode(frame_rate)
         if frame_rate_embeddings.ndim != 2 or frame_rate_embeddings.shape[0] != batch_size:
             raise ValueError(
                 "frame_rate must have shape [B]. "
@@ -454,11 +465,12 @@ class DiT(nn.Module):
         if f > self.max_num_frames:
             raise ValueError(f"Received {f} frames, but max_num_frames={self.max_num_frames}")
 
-        frame_embeddings = self._get_frame_rate_embeddings(frame_rate, batch_size=b, num_frames=f, device=x.device)
+        frame_embeddings = self._get_frame_rate_embeddings(frame_rate, batch_size=b, num_frames=f, reference=x)
         x = rearrange(x, "b f c h w -> (b f) c h w")
-        x = self.x_embedder(x) + self.pos_embed.to(x.device)
+        # pos_embed is a parameter, already on the model's device; see _get_frame_embeddings above.
+        x = self.x_embedder(x) + self.pos_embed
         x = rearrange(x, "(b f) hw c -> b f hw c", b=b, f=f)
-        x = x + self._get_frame_embeddings(f, x.device) + frame_embeddings
+        x = x + self._get_frame_embeddings(f) + frame_embeddings
         return x
 
     def run_blocks(self, x, c, return_features=False):
@@ -685,7 +697,6 @@ class SpatialL2CtxAndLastDiT(DiT):
                 f"num_context_frames={self.num_context_frames} exceeds num_frames={num_frames}."
             )
 
-        device = z_l2_start.device
         dtype = z_l2_start.dtype
         z_start_tok = self._patchify_l2(z_l2_start.unsqueeze(1))
         z_end_tok = self._patchify_l2(z_l2_end.unsqueeze(1))
@@ -695,7 +706,9 @@ class SpatialL2CtxAndLastDiT(DiT):
         frames_cond = []
         for frame_idx in range(num_frames):
             pos_val = frame_idx / (num_frames - 1) if num_frames > 1 else 0.0
-            pos = torch.tensor([[pos_val]], device=device, dtype=dtype)
+            # z_l2_start supplies the device via new_tensor instead of a bare `.device` read,
+            # which crashes Dynamo on some torch builds (see TimestepEmbedder in modules/dit.py).
+            pos = z_l2_start.new_tensor([[pos_val]], dtype=dtype)
             pos_emb = self.position_proj(pos)
 
             if frame_idx == ctx_idx:

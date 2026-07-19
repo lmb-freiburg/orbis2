@@ -48,11 +48,8 @@ class _L1L2FrameIndexer(L2ContextMixin):
         )
 
 
-def resolve_context_image_size(args, config):
-    """Return (height, width) to resize context images to, from CLI args or the training config."""
-    if args.height is not None and args.width is not None:
-        return int(args.height), int(args.width)
-
+def resolve_context_image_size(config):
+    """Return (height, width) to resize context images to, from the inference config."""
     try:
         size = OmegaConf.select(config, "data.params.validation.params.size")
     except ConfigTypeError:
@@ -60,10 +57,7 @@ def resolve_context_image_size(args, config):
     if size is None:
         size = config.data.params.train[0].params.size
     size = (size, size) if isinstance(size, int) else tuple(size)
-
-    height = int(args.height) if args.height is not None else int(size[0])
-    width = int(args.width) if args.width is not None else int(size[1])
-    return height, width
+    return int(size[0]), int(size[1])
 
 
 def require_l1l2_model(model):
@@ -78,25 +72,27 @@ def require_l1l2_model(model):
         )
 
 
-def resolve_l2_frame_rate(args, model):
-    """Return the L2 sampling rate, defaulting to (and validating against) the frozen L2 predictor's own rate."""
-    model_rate = model.condition_preprocessor.l2_predictor_frame_rate
-    if args.l2_frame_rate is None:
-        return float(model_rate)
-    if abs(float(args.l2_frame_rate) - float(model_rate)) > 1e-6:
-        raise ValueError(
-            f"--l2_frame_rate={args.l2_frame_rate:g} does not match the frozen L2 predictor's "
-            f"trained frame rate ({model_rate:g}); the L2 image context must be sampled at the "
-            "rate the L2 predictor was trained on."
-        )
-    return float(args.l2_frame_rate)
+def resolve_l2_frame_rate(model):
+    """Return the L2 sampling rate: the frozen L2 predictor's own trained rate."""
+    return float(model.condition_preprocessor.l2_predictor_frame_rate)
+
+
+def resolve_l1_frame_rate(config):
+    """Return the L1 (context/rollout) frame rate (Hz) declared in the inference config."""
+    try:
+        frame_rate = OmegaConf.select(config, "data.params.validation.params.frame_rate")
+    except ConfigTypeError:
+        frame_rate = None
+    if frame_rate is None:
+        frame_rate = config.data.params.train[0].params.frame_rate
+    return float(frame_rate)
 
 
 def load_l1_l2_context(video_path, start_frame, l1_frame_rate, l2_frame_rate, l1_context_frames, l2_context_frames, height, width, backend, device):
     """Sample L1 (high-rate) and L2 (low-rate, further back) context windows from one video."""
     native_fps, video_length = get_video_fps_and_length(video_path, backend)
-    frame_interval = compute_frame_interval(native_fps, l1_frame_rate, "--l1_frame_rate")
-    compute_frame_interval(native_fps, l2_frame_rate, "--l2_frame_rate")
+    frame_interval = compute_frame_interval(native_fps, l1_frame_rate, "the L1 frame rate (data.params.validation.params.frame_rate)")
+    compute_frame_interval(native_fps, l2_frame_rate, "the L2 predictor's trained frame rate")
 
     indexer = _L1L2FrameIndexer(
         frame_interval=frame_interval,
@@ -120,7 +116,7 @@ def load_l1_l2_context(video_path, start_frame, l1_frame_rate, l2_frame_rate, l1
         raise ValueError(
             f"Video does not have enough lookback for L2 context: start_frame={start_frame} but "
             f"at least {required_offset} frames of history are required before it. "
-            "Use a longer video, a later --start_frame, or a lower --l2_frame_rate."
+            "Use a longer video or a later --start_frame."
         )
 
     l1_indices, l2_indices = indexer.get_l1_and_l2_indices(start_frame, l1_context_frames)
@@ -236,23 +232,23 @@ def make_unconditional_steering(min_odo_steps, dtype, device):
     return torch.full((1, int(min_odo_steps), 2), float("nan"), dtype=dtype, device=device)
 
 
-def maybe_apply_l2_num_steps(model, l2_num_steps):
+def maybe_apply_l2_nfe(model, l2_nfe):
     """Override the frozen L2 predictor's sampler steps (its `l2_pred_NFE`).
 
-    L1 and L2 are sampled at different step counts: --num_steps is L1's NFE, while
+    L1 and L2 are sampled at different step counts: --l1_nfe is L1's NFE, while
     L2's comes from the config's `l2_pred_NFE`. Setting the attribute post-init is
     enough -- it is read at sample time, not at construction.
     """
-    if l2_num_steps is None:
+    if l2_nfe is None:
         return
 
     condition_preprocessor = getattr(model, "condition_preprocessor", None)
     if condition_preprocessor is None or not hasattr(condition_preprocessor, "l2_pred_NFE"):
         raise TypeError(
-            "--l2_num_steps was given but the loaded condition_preprocessor has no "
+            "--l2_nfe was given but the loaded condition_preprocessor has no "
             "`l2_pred_NFE` (so it has no separately-sampled L2 predictor)."
         )
-    condition_preprocessor.l2_pred_NFE = int(l2_num_steps)
+    condition_preprocessor.l2_pred_NFE = int(l2_nfe)
 
 
 @torch.no_grad()
@@ -308,11 +304,12 @@ def generate_images(args, unknown_args):
             )
 
     maybe_apply_condition_preprocessor_scales(model, args.speed_scale, args.yaw_rate_scale)
-    maybe_apply_l2_num_steps(model, args.l2_num_steps)
+    maybe_apply_l2_nfe(model, args.l2_nfe)
 
-    height, width = resolve_context_image_size(args, config)
+    height, width = resolve_context_image_size(config)
     backend = resolve_video_backend()
-    l2_frame_rate = resolve_l2_frame_rate(args, model)
+    l1_frame_rate = resolve_l1_frame_rate(config)
+    l2_frame_rate = resolve_l2_frame_rate(model)
 
     l1_context_frames = int(model.vit.num_context_frames)
     l2_context_frames = int(model.condition_preprocessor.num_context_frames)
@@ -320,7 +317,7 @@ def generate_images(args, unknown_args):
     l1_tensor, l2_tensor = load_l1_l2_context(
         video_path=args.video,
         start_frame=args.start_frame,
-        l1_frame_rate=args.l1_frame_rate,
+        l1_frame_rate=l1_frame_rate,
         l2_frame_rate=l2_frame_rate,
         l1_context_frames=l1_context_frames,
         l2_context_frames=l2_context_frames,
@@ -331,7 +328,7 @@ def generate_images(args, unknown_args):
     )
 
     num_future_frames = get_rollout_future_frame_count(model, args.num_gen_frames)
-    frame_rate = torch.tensor(float(args.l1_frame_rate), device=args.device)
+    frame_rate = torch.tensor(l1_frame_rate, device=args.device)
     data_batch = {"images": l1_tensor, "l2_context": l2_tensor, "frame_rate": frame_rate}
 
     if args.steering_file is not None and args.trajectory_file is not None:
@@ -357,7 +354,7 @@ def generate_images(args, unknown_args):
                 "required odometry length (get_required_rollout_odometry_steps returned None)."
             )
         odometry_steps_per_image_frame = getattr(model.condition_preprocessor, "odometry_steps_per_image_frame", 1)
-        dt = 1.0 / (args.l1_frame_rate * odometry_steps_per_image_frame)
+        dt = 1.0 / (l1_frame_rate * odometry_steps_per_image_frame)
         traj_xy = load_trajectory_points(args.trajectory_file)
         traj_xy = resample_trajectory_by_arclength(traj_xy, min_odo_steps + 1)
         speed_yawrate = trajectory_to_speed_yawrate(traj_xy, dt)
@@ -367,22 +364,6 @@ def generate_images(args, unknown_args):
     else:
         data_batch["steering"] = make_unconditional_steering(min_odo_steps, dtype=l1_tensor.dtype, device=args.device)
     data_batch["steering_format"] = STEERING_FORMAT
-
-    # Roll out `num_videos` futures in parallel from the same context, as a single
-    # minibatch. The context (and steering) is tiled along the batch dim; the sampler
-    # draws independent initial noise per element, so the futures diverge under one
-    # seed. Everything below is computed at the tiled batch size so condition_kwargs
-    # stays internally consistent.
-    num_videos = max(1, int(args.num_videos))
-    if num_videos > 1:
-        def _tile_batch(t):
-            return t.repeat(num_videos, *([1] * (t.dim() - 1)))
-
-        l1_tensor = _tile_batch(l1_tensor)
-        l2_tensor = _tile_batch(l2_tensor)
-        data_batch["images"] = l1_tensor
-        data_batch["l2_context"] = l2_tensor
-        data_batch["steering"] = _tile_batch(data_batch["steering"])
 
     condition_kwargs = model.condition_preprocessor.get_condition_kwargs_from_batch(data_batch, split="rollout")
 
@@ -394,7 +375,7 @@ def generate_images(args, unknown_args):
         steering_source = "none"
     logger.info(f"Steering source: {steering_source}")
     logger.info(f"Steering scales: speed={args.speed_scale:g}, yaw_rate={args.yaw_rate_scale:g}")
-    logger.info(f"L1/L2 frame rates: {args.l1_frame_rate:g}/{l2_frame_rate:g} Hz")
+    logger.info(f"L1/L2 frame rates: {l1_frame_rate:g}/{l2_frame_rate:g} Hz")
     logger.info(f"Saving generated images to {args.output_dir}")
 
     autocast_enabled = args.device.startswith("cuda")
@@ -403,8 +384,8 @@ def generate_images(args, unknown_args):
             x_0={"images": l1_tensor},
             num_gen_frames=args.num_gen_frames,
             latent_input=False,
-            NFE=args.num_steps,
-            eta=args.eta,
+            NFE=args.l1_nfe,
+            eta=0.0,
             sample_with_ema=args.evaluate_ema,
             num_samples=l1_tensor.size(0),
             frame_rate=frame_rate.reshape(1).repeat(l1_tensor.size(0)),
@@ -445,7 +426,7 @@ def generate_images(args, unknown_args):
                 np.array(Image.open(os.path.join(seq_dir, f"frame_{f:04d}.jpg")))
                 for f in range(num_frames)
             ],
-            fps=args.l1_frame_rate,
+            fps=l1_frame_rate,
             loop=0,
         )
 
@@ -473,11 +454,7 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt", type=str, default="checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the config file, relative to exp_dir")
     parser.add_argument("--video", type=str, required=True, help="Path to the input video file to sample L1/L2 context from.")
-    parser.add_argument("--l1_frame_rate", type=float, required=True, help="Frame rate (Hz) to sample L1 context/rollout frames at, and the generated GIF's fps.")
-    parser.add_argument("--l2_frame_rate", type=float, default=None, help="Frame rate (Hz) to sample L2 context frames at. Defaults to the frozen L2 predictor's own trained frame rate; must match it if given explicitly.")
     parser.add_argument("--start_frame", type=int, default=None, help="Native-video frame index to start the L1 context window at. Defaults to the latest window that fits (the end of the video).")
-    parser.add_argument("--height", type=int, default=None, help="Height to resize context images to. Defaults to the training config's size.")
-    parser.add_argument("--width", type=int, default=None, help="Width to resize context images to. Defaults to the training config's size.")
     parser.add_argument(
         "--num_gen_frames",
         type=int,
@@ -485,12 +462,6 @@ if __name__ == "__main__":
         help="Number of rollout steps to generate; each step predicts `model.num_pred_frames` future frames.",
     )
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save the generated frames and GIF to.")
-    parser.add_argument(
-        "--num_videos",
-        type=int,
-        default=1,
-        help="Number of futures to roll out in parallel from the same context, as one minibatch.",
-    )
     parser.add_argument(
         "--vis_mode",
         type=str,
@@ -518,15 +489,14 @@ if __name__ == "__main__":
         default="cpu",
         help="Device used for decoded rollout frames. Use 'cpu' to reduce peak GPU memory during saving.",
     )
-    parser.add_argument("--num_steps", type=int, default=30, help="Number of sampler steps (NFE) for the L1 detail predictor")
+    parser.add_argument("--l1_nfe", type=int, default=30, help="Number of sampler steps (NFE) for the L1 detail predictor")
     parser.add_argument(
-        "--l2_num_steps",
+        "--l2_nfe",
         type=int,
         default=None,
         help="Number of sampler steps (NFE) for the frozen L2 abstract predictor. "
              "Overrides the config's `l2_pred_NFE`; defaults to whatever the config sets.",
     )
-    parser.add_argument("--eta", type=float, default=0.0, help="Stochasticity for sampling")
     parser.add_argument("--evaluate_ema", "--use_ema", type=str2bool, default=True, help="If the evaluation happen with ema model")
     parser.add_argument(
         "--compile",
