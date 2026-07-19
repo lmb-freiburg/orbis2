@@ -27,24 +27,11 @@ from evaluate.utils import (
     str2bool,
 )
 
+from util import instantiate_from_config
 
 logger = logging.getLogger(__name__)
 
 STEERING_FORMAT = "speed_yawrate"
-
-
-def get_obj_from_str(string, reload=False):
-    module, cls = string.rsplit(".", 1)
-    if reload:
-        module_imp = importlib.import_module(module)
-        importlib.reload(module_imp)
-    return getattr(importlib.import_module(module, package=None), cls)
-
-
-def instantiate_from_config(config):
-    if not "target" in config:
-        raise KeyError("Expected key `target` to instantiate.")
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
 
 class _L1L2FrameIndexer(L2ContextMixin):
