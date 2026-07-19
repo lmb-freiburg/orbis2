@@ -31,7 +31,7 @@
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "1",
-                "ORBIS2_MODELS_DIR": "checkpoints/orbis2_test"
+                "ORBIS2_MODELS_DIR": "scratch/orbis2_test"
             }
         }
     ]

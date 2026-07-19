@@ -450,7 +450,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp_dir", type=str, default=None, help="Path to the experiment directory, where the config and checkpoints are stored")
+    parser.add_argument(
+        "--exp_dir",
+        type=str,
+        default=os.environ.get("ORBIS2_MODELS_DIR"),
+        help="Path to the experiment directory, where the config and checkpoints are stored. "
+             "Defaults to the ORBIS2_MODELS_DIR environment variable.",
+    )
     parser.add_argument("--ckpt", type=str, default="checkpoints/last.ckpt", help="Path to the checkpoint file, relative to exp_dir")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to the config file, relative to exp_dir")
     parser.add_argument("--video", type=str, required=True, help="Path to the input video file to sample L1/L2 context from.")
@@ -524,6 +530,11 @@ if __name__ == "__main__":
     )
 
     args, unknown = parser.parse_known_args()
+
+    if args.exp_dir is None:
+        raise ValueError(
+            "--exp_dir was not given and the ORBIS2_MODELS_DIR environment variable is not set."
+        )
 
     args.ckpt = os.path.join(args.exp_dir, args.ckpt)
     args.config = os.path.join(args.exp_dir, args.config)
