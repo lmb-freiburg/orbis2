@@ -1,6 +1,6 @@
 # Orbis 2: A Hierarchical World Model for Driving
 **Official Implementation**
-## [Paper (TODO)](https://https://arxiv.org/abs/2607.15898) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace Demo](https://huggingface.co/spaces/sud0301/orbis2_test) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
+## [Paper](https://https://arxiv.org/abs/2607.15898) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace Demo](https://huggingface.co/spaces/sud0301/orbis2_test) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
 
 >[Sudhanshu Mittal*](https://lmb.informatik.uni-freiburg.de/people/mittal/), [Arian Mousakhan*](https://lmb.informatik.uni-freiburg.de/people/mousakha/), [Silvio Galesso*](https://lmb.informatik.uni-freiburg.de/people/galessos/), [Karim Farid](https://lmb.informatik.uni-freiburg.de/people/faridk/), [Johannes Dienert](https://lmb.informatik.uni-freiburg.de/people/dienertj/), [Rajat Sahay](https://lmb.informatik.uni-freiburg.de/people/sahayr/), [Thomas Brox](https://lmb.informatik.uni-freiburg.de/people/brox/index.html)
 > <br>University of Freiburg<br>
@@ -74,10 +74,10 @@ The L1 frame rate is not a CLI argument: it is read automatically from the confi
 | `--decode_device` | Device used for decoded rollout frames; `cpu` (default) reduces peak GPU memory during saving. |
 | `--compile` | Wrap the networks with `torch.compile` for faster inference; combine with `--compile_mode` and `--compile_artifacts` to tune / cache the compiled graphs across runs. |
 
-## License (TODO)
+## License
+All content in this repository are under the [MIT License](https://opensource.org/license/mit).
 
-
-## BibTeX (TODO)
+## BibTeX
 ```bibtex
 @article{orbis2_2026,
   author    = {Mittal, Sudhanshu and Mousakhan, Arian and Galesso, Silvio and
