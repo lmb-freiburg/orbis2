@@ -40,7 +40,7 @@ git clone https://huggingface.co/sud0301/orbis2
 
 Set the environment variable `ORBIS2_MODELS_DIR` with the path of the checkpoints folder, e.g.:
 ```bash
-export ORBIS2_MODELS_DIR=(TODO)
+export ORBIS2_MODELS_DIR=./orbis2
 ```
 
 To roll out the model using an input context video:
