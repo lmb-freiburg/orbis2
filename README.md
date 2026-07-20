@@ -30,9 +30,9 @@ conda activate orbis2_env
 ```
 
 ## Checkpoints
-Clone the [Huggingface repository](TODO) containing the necessary model weights and config files:
+Clone the [Huggingface repository](https://huggingface.co/sud0301/orbis2) containing the necessary model weights and config files:
 ```bash
-git clone TODO
+git clone https://huggingface.co/sud0301/orbis2
 ```
 
 ## Video Generation (Roll-out)
