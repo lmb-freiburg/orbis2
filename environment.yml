@@ -1,0 +1,22 @@
+# ORBIS2 conda environment
+name: orbis2_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch>=2.4
+      - torchvision>=0.19
+      - pytorch-lightning>=2.2
+      - timm>=1.0
+      - numpy>=1.26
+      - pandas>=2.0
+      - einops>=0.8
+      - omegaconf>=2.3
+      - pillow>=10.0
+      - opencv-python>=4.9
+      - imageio>=2.34
+      - h5py>=3.10
+      - tqdm>=4.66
+      - decord2>=3.0
