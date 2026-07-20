@@ -32,7 +32,8 @@ conda activate orbis2_env
 ## Checkpoints
 Clone the [Huggingface repository](https://huggingface.co/sud0301/orbis2) repo containing the necessary model weights and config files:
 ```bash
-git clone https://huggingface.co/sud0301/orbis2
+curl -LsSf https://hf.co/cli/install.sh | bash   # install HF CLI if necessary
+hf download sud0301/orbis2 --local-dir checkpoints
 ```
 The repo contains the tokenizer, L1 and L2 (standard and distilled) checkpoints.
 
@@ -41,7 +42,7 @@ The repo contains the tokenizer, L1 and L2 (standard and distilled) checkpoints.
 
 Set the environment variable `ORBIS2_MODELS_DIR` with the path of the checkpoints folder, e.g.:
 ```bash
-export ORBIS2_MODELS_DIR=./orbis2
+export ORBIS2_MODELS_DIR=./checkpoints
 ```
 
 To roll out the model using an input context video:
