@@ -1,6 +1,6 @@
 # Orbis 2: A Hierarchical World Model for Driving
 **Official Implementation**
-## [Paper](https://arxiv.org/abs/2607.15898) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace Demo](https://huggingface.co/spaces/sud0301/orbis2_test) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
+## [Paper](https://arxiv.org/abs/2607.15898) | [Project Page](https://lmb-freiburg.github.io/orbis2.github.io/) | [HuggingFace Demo](https://sud0301-orbis2-test.hf.space) | [Orbis 1](https://lmb-freiburg.github.io/orbis.github.io/)
 
 >[Sudhanshu Mittal*](https://lmb.informatik.uni-freiburg.de/people/mittal/), [Arian Mousakhan*](https://lmb.informatik.uni-freiburg.de/people/mousakha/), [Silvio Galesso*](https://lmb.informatik.uni-freiburg.de/people/galessos/), [Karim Farid](https://lmb.informatik.uni-freiburg.de/people/faridk/), [Johannes Dienert](https://lmb.informatik.uni-freiburg.de/people/dienertj/), [Rajat Sahay](https://lmb.informatik.uni-freiburg.de/people/sahayr/), [Thomas Brox](https://lmb.informatik.uni-freiburg.de/people/brox/index.html)
 > <br>University of Freiburg<br>
@@ -30,10 +30,11 @@ conda activate orbis2_env
 ```
 
 ## Checkpoints
-Clone the [Huggingface repository](https://huggingface.co/sud0301/orbis2) containing the necessary model weights and config files:
+Clone the [Huggingface repository](https://huggingface.co/sud0301/orbis2) repo containing the necessary model weights and config files:
 ```bash
 git clone https://huggingface.co/sud0301/orbis2
 ```
+The repo contains the tokenizer, L1 and L2 (standard and distilled) checkpoints.
 
 ## Video Generation (Roll-out)
 `evaluate/rollout_demo_v2.py` rolls out the world model from a single input video: it samples the L1 (high-rate) and L2 (low-rate, further back in time) context windows directly from the video, then autoregressively generates future frames.
@@ -59,6 +60,10 @@ python evaluate/rollout_demo_v2.py \
     --output_dir rollout_traj
 ```
 
+### Inference speed
+To speed-up inference you can do the following things:
+- use the distilled L2 model by selecting the `L1/config_distill.yaml` config file. The distilled L2 model can work with as little as 4 NFEs.
+- change the NFEs via the sampler parameters in the config files, or using the CLI arguments. However, the L1 model already uses very few steps.
 
 ### Useful options
 The L1 frame rate is not a CLI argument: it is read automatically from the config (`data.params.validation.params.frame_rate`).
